@@ -8,7 +8,6 @@ from typing import Optional, List
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ChatAction
-from aiogram.utils.markdown import text as md_text, hbold, hitalic, hcode, hlink
 from dotenv import load_dotenv
 
 # ==================== НАСТРОЙКА ====================
@@ -541,6 +540,21 @@ async def log_all_messages(message: types.Message):
         logger.debug(f"💬 Сообщение без '?' от {message.from_user.id}: {message.text[:50]}...")
 
 # ==================== ЗАПУСК БОТА ====================
+async def close_previous_session():
+    """Закрывает предыдущую сессию бота через Telegram API"""
+    try:
+        logger.info("🔄 Закрытие предыдущей сессии бота...")
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/close"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, timeout=5) as response:
+                data = await response.json()
+                if data.get('ok'):
+                    logger.info("✅ Предыдущая сессия закрыта")
+                else:
+                    logger.warning(f"⚠️ Не удалось закрыть предыдущую сессию: {data}")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка при закрытии предыдущей сессии: {e}")
+
 async def main():
     """Основная функция запуска"""
     logger.info("=" * 60)
@@ -552,6 +566,10 @@ async def main():
     logger.info("=" * 60)
     
     try:
+        # Закрываем предыдущую сессию в Telegram
+        await close_previous_session()
+        await asyncio.sleep(2)  # Ждем 2 секунды
+        
         # Очищаем предыдущие обновления
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("🔄 Очищены предыдущие обновления")
