@@ -36,7 +36,7 @@ OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL_MAIN = "meta-llama/llama-3.3-70b-instruct:free"
 
 # Модель DeepSeek для анализа ответов
-OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1:free"  # Рабочая модель
+OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1-0528:free"  # Рабочая модель
 
 # Настройки генерации - оптимизированы для скорости
 GENERATION_CONFIG_MAIN = {
