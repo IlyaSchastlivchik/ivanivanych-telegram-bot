@@ -34,7 +34,7 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
 OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") + "/chat/completions"
 
 # Основная модель (Llama) - ускоренная версия
-OPENROUTER_MODEL_MAIN = "meta-llama/llama-3.1-8b-instruct:free"  # Быстрее 70B
+OPENROUTER_MODEL_MAIN = "meta-llama/llama-3.3-70b-instruct:free"
 
 # Модель DeepSeek для анализа ответов
 OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1:free"  # Рабочая модель
