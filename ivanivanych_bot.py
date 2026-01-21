@@ -8,7 +8,7 @@ from typing import Optional, List
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ChatAction
-from aiogram.utils.markdown import escape_markdown
+from aiogram.utils.markdown import text as md_text, hbold, hitalic, hcode, hlink
 from dotenv import load_dotenv
 
 # ==================== НАСТРОЙКА ====================
@@ -60,29 +60,15 @@ GENERATION_CONFIG_DEEPSEEK = {
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# ==================== СИСТЕМНЫЕ ПРОМПТЫ ====================
-SYSTEM_PROMPT_MAIN = {
-    "role": "system",
-    "content": (
-        "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
-        "Отвечай ясно, по делу, с технической точностью. Используй Markdown для форматирования: "
-        "**жирный** для ключевых терминов, ```код``` для примеров."
-    )
-}
+# ==================== УТИЛИТЫ ЭКРАНИРОВАНИЯ ====================
+def escape_markdown_v2(text: str) -> str:
+    """
+    Экранирует текст для MarkdownV2 в Telegram.
+    Список символов для экранирования: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    """
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return ''.join(['\\' + char if char in escape_chars else char for char in text])
 
-SYSTEM_PROMPT_DEEPSEEK = {
-    "role": "system",
-    "content": (
-        "Ты — технический аналитик. Получив вопрос и ответ, предоставь:\n"
-        "1. **Глубокий анализ** недостатков/пробелов\n"
-        "2. **Конкретные детали** (цифры, технологии, даты)\n"
-        "3. **Практические шаги реализации**\n"
-        "4. **Риски и альтернативы**\n"
-        "Будь максимально конкретным и техничным."
-    )
-}
-
-# ==================== УТИЛИТЫ ====================
 def prepare_markdown_v2_safe(text: str) -> str:
     """
     Подготавливает текст для отправки в режиме MarkdownV2.
@@ -91,7 +77,7 @@ def prepare_markdown_v2_safe(text: str) -> str:
     # Проверяем, есть ли блоки кода в тексте
     if '```' not in text:
         # Если блоков кода нет, экранируем весь текст
-        return escape_markdown(text, version=2)
+        return escape_markdown_v2(text)
     
     # Если есть блоки кода, обрабатываем их отдельно
     pattern = r'(```[\w]*\n[\s\S]*?\n```)'
@@ -103,7 +89,7 @@ def prepare_markdown_v2_safe(text: str) -> str:
             result_parts.append(part)
         else:  # Обычный текст (четные индексы)
             if part:  # Если не пустая строка
-                result_parts.append(escape_markdown(part, version=2))
+                result_parts.append(escape_markdown_v2(part))
     
     return ''.join(result_parts)
 
@@ -179,7 +165,7 @@ async def send_simple_message(chat_id: int, text: str, reply_to_message_id: int 
     """Универсальная функция для отправки простых сообщений"""
     try:
         if parse_mode == "MarkdownV2":
-            text = escape_markdown(text, version=2)
+            text = escape_markdown_v2(text)
         
         send_kwargs = {
             "chat_id": chat_id,
@@ -204,6 +190,28 @@ async def send_simple_message(chat_id: int, text: str, reply_to_message_id: int 
         except Exception as e2:
             logger.error(f"❌ Не удалось отправить сообщение вообще: {e2}")
             return None
+
+# ==================== СИСТЕМНЫЕ ПРОМПТЫ ====================
+SYSTEM_PROMPT_MAIN = {
+    "role": "system",
+    "content": (
+        "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
+        "Отвечай ясно, по делу, с технической точностью. Используй Markdown для форматирования: "
+        "**жирный** для ключевых терминов, ```код``` для примеров."
+    )
+}
+
+SYSTEM_PROMPT_DEEPSEEK = {
+    "role": "system",
+    "content": (
+        "Ты — технический аналитик. Получив вопрос и ответ, предоставь:\n"
+        "1. **Глубокий анализ** недостатков/пробелов\n"
+        "2. **Конкретные детали** (цифры, технологии, даты)\n"
+        "3. **Практические шаги реализации**\n"
+        "4. **Риски и альтернативы**\n"
+        "Будь максимально конкретным и техничным."
+    )
+}
 
 # ==================== ФУНКЦИИ ДЛЯ OPENROUTER ====================
 async def ask_openrouter(user_question: str, model: str, system_prompt: dict, config: dict) -> Optional[str]:
@@ -319,8 +327,8 @@ async def cmd_help(message: types.Message):
         "1️⃣ Llama отвечает первым \\(5\\-10с\\)\n"
         "2️⃣ DeepSeek добавляет анализ \\(10\\-15с\\)\n\n"
         f"🔧 *Модели:*\n"
-        f"• Основная: `{escape_markdown(OPENROUTER_MODEL_MAIN, version=2)}`\n"
-        f"• Аналитик: `{escape_markdown(OPENROUTER_MODEL_DEEPSEEK, version=2)}`\n\n"
+        f"• Основная: `{escape_markdown_v2(OPENROUTER_MODEL_MAIN)}`\n"
+        f"• Аналитик: `{escape_markdown_v2(OPENROUTER_MODEL_DEEPSEEK)}`\n\n"
         "💡 *Совет:* Сложные технические вопросы получают лучший анализ\\!"
     )
     await send_simple_message(message.chat.id, help_text, message.message_id)
@@ -329,10 +337,10 @@ async def cmd_help(message: types.Message):
 async def cmd_model(message: types.Message):
     model_info = (
         f"🤖 *Архитектура бота*\n\n"
-        f"**1\\. {escape_markdown(OPENROUTER_MODEL_MAIN.split('/')[-1], version=2)}**\n"
+        f"**1\\. {escape_markdown_v2(OPENROUTER_MODEL_MAIN.split('/')[-1])}**\n"
         f"• Настройки: {GENERATION_CONFIG_MAIN['temperature']} temp, {GENERATION_CONFIG_MAIN['max_tokens']} токенов\n"
         f"• Задача: Быстрый качественный ответ\n\n"
-        f"**2\\. {escape_markdown(OPENROUTER_MODEL_DEEPSEEK.split('/')[-1], version=2)}**\n"
+        f"**2\\. {escape_markdown_v2(OPENROUTER_MODEL_DEEPSEEK.split('/')[-1])}**\n"
         f"• Настройки: {GENERATION_CONFIG_DEEPSEEK['temperature']} temp, {GENERATION_CONFIG_DEEPSEEK['max_tokens']} токенов\n"
         f"• Задача: Глубокий технический анализ"
     )
@@ -377,8 +385,8 @@ async def cmd_status(message: types.Message):
         
         status_text = (
             f"📊 *Статус моделей*\n\n"
-            f"**{escape_markdown(OPENROUTER_MODEL_MAIN.split('/')[-1], version=2)}**: {llama_status}\n"
-            f"**{escape_markdown(OPENROUTER_MODEL_DEEPSEEK.split('/')[-1], version=2)}**: {deepseek_status}\n\n"
+            f"**{escape_markdown_v2(OPENROUTER_MODEL_MAIN.split('/')[-1])}**: {llama_status}\n"
+            f"**{escape_markdown_v2(OPENROUTER_MODEL_DEEPSEEK.split('/')[-1])}**: {deepseek_status}\n\n"
             f"⏱️ *Лимиты:*\n"
             f"• Llama: до {GENERATION_CONFIG_MAIN['max_tokens']} токенов\n"
             f"• DeepSeek: до {GENERATION_CONFIG_DEEPSEEK['max_tokens']} токенов"
@@ -387,7 +395,7 @@ async def cmd_status(message: types.Message):
         await status_msg.edit_text(status_text, parse_mode="MarkdownV2")
         
     except Exception as e:
-        error_msg = escape_markdown(f"⚠️ Ошибка проверки: {str(e)[:200]}", version=2)
+        error_msg = escape_markdown_v2(f"⚠️ Ошибка проверки: {str(e)[:200]}")
         await status_msg.edit_text(error_msg, parse_mode="MarkdownV2")
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
@@ -523,7 +531,7 @@ async def handle_question(message: types.Message):
         )
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
-        error_msg = escape_markdown(f"⚠️ Ошибка обработки: {str(e)[:200]}", version=2)
+        error_msg = escape_markdown_v2(f"⚠️ Ошибка обработки: {str(e)[:200]}")
         await send_simple_message(chat_id, error_msg, message.message_id, parse_mode="MarkdownV2")
 
 @dp.message()
