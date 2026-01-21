@@ -29,7 +29,9 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     exit(1)
 
 # Конфигурация OpenRouter API
-OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") + "/chat/completions"
+#OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") + "/chat/completions"
+# Просто прямое указание - исключает любые ошибки с переменными окружения
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free"  # Креативная и мощная модель
 
 # Настройки генерации
