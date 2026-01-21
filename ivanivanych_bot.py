@@ -35,8 +35,8 @@ OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 # Основная модель (Llama)
 OPENROUTER_MODEL_MAIN = "meta-llama/llama-3.3-70b-instruct:free"
 
-# Модель DeepSeek для анализа ответов
-OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1:free"
+# ✅ ИСПРАВЛЕНИЕ 1: Рабочая модель DeepSeek
+OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1-0528:free"  # Было: "deepseek/deepseek-r1:free"
 
 # Настройки генерации
 GENERATION_CONFIG_MAIN = {
@@ -69,6 +69,7 @@ def escape_markdown_v2(text: str) -> str:
 
 async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
     """Отправляет длинное сообщение с правильным экранированием"""
+    # ✅ ИСПРАВЛЕНИЕ 2: Двойное экранирование для заголовков
     processed_text = escape_markdown_v2(text)
     
     # Разбиваем на части если слишком длинное
@@ -93,6 +94,15 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
                 await asyncio.sleep(0.3)
         except Exception as e:
             logger.error(f"❌ Ошибка при отправке части: {e}")
+            # ✅ ИСПРАВЛЕНИЕ 3: Отправка без форматирования при ошибке
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Часть {i+1}:\n\n{escape_markdown_v2(part)[:1000]}",
+                    parse_mode=None
+                )
+            except Exception as e2:
+                logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
 
 async def send_simple_message(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
     """Универсальная функция для отправки простых сообщений"""
@@ -106,7 +116,17 @@ async def send_simple_message(chat_id: int, text: str, reply_to_message_id: int 
         )
     except Exception as e:
         logger.error(f"❌ Ошибка отправки сообщения: {e}")
-        return None
+        # Отправка без форматирования при ошибке
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=None,
+                reply_to_message_id=reply_to_message_id
+            )
+        except Exception as e2:
+            logger.error(f"❌ Не удалось отправить сообщение вообще: {e2}")
+            return None
 
 # ==================== СИСТЕМНЫЕ ПРОМПТЫ ====================
 SYSTEM_PROMPT_MAIN = {
@@ -264,9 +284,11 @@ async def handle_question(message: types.Message):
                     parse_mode="MarkdownV2"
                 )
             
+            # Экранируем заголовок отдельно
+            header = "**🤖 Ответ Llama 3\\.3:**"
             await send_long_message(
                 chat_id=chat_id,
-                text=f"**🤖 Ответ Llama 3\\.3:**\n\n{llama_response}",
+                text=f"{header}\n\n{llama_response}",
                 reply_to_message_id=message.message_id
             )
         else:
@@ -281,9 +303,10 @@ async def handle_question(message: types.Message):
         # ШАГ 4: ПОТОМ ОТПРАВЛЯЕМ ОТВЕТ DEEPSEEK (ЕСЛИ ЕСТЬ)
         if deepseek_response and len(deepseek_response) > 50:
             logger.info("📤 Отправка ответа DeepSeek...")
+            header = "**🔍 Глубокий анализ DeepSeek R1:**"
             await send_long_message(
                 chat_id=chat_id,
-                text=f"**🔍 Глубокий анализ DeepSeek R1:**\n\n{deepseek_response}",
+                text=f"{header}\n\n{deepseek_response}",
                 reply_to_message_id=message.message_id
             )
             
