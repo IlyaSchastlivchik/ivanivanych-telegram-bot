@@ -62,128 +62,119 @@ dp = Dispatcher()
 # ==================== УТИЛИТЫ ЭКРАНИРОВАНИЯ ====================
 def escape_markdown_v2(text: str) -> str:
     """
-    Экранирует текст для MarkdownV2 в Telegram.
-    Только специальные символы, не трогает уже экранированные.
+    ПРОСТАЯ И НАДЁЖНАЯ функция экранирования для MarkdownV2.
+    Экранирует ВСЕ специальные символы без исключений.
     """
-    # Список символов для экранирования в MarkdownV2
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    # Все символы, которые нужно экранировать в MarkdownV2
+    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     
-    # Находим все НЕэкранированные спецсимволы и экранируем их
-    # Регулярное выражение ищет символы из escape_chars, которым НЕ предшествует \
-    pattern = r'(?<!\\)([' + re.escape(escape_chars) + r'])'
+    for char in chars_to_escape:
+        text = text.replace(char, '\\' + char)
     
-    # Заменяем найденные символы на экранированные
-    return re.sub(pattern, r'\\\1', text)
+    return text
 
-def prepare_for_markdown(text: str) -> str:
+async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = None, 
+                           parse_mode: str = "MarkdownV2") -> Optional[types.Message]:
     """
-    Подготавливает текст от ИИ для отправки в MarkdownV2.
-    Обрабатывает отдельно заголовки и основной текст.
+    БЕЗОПАСНАЯ отправка сообщений с автоматическим fallback.
+    Всегда работает, даже если MarkdownV2 не сработает.
     """
-    # Если текст уже содержит экранированные символы от ИИ, не трогаем их
-    # Просто убеждаемся, что все нужные символы экранированы
-    lines = text.split('\n')
-    processed_lines = []
+    # Попытка 1: С MarkdownV2
+    try:
+        escaped_text = escape_markdown_v2(text)
+        kwargs = {
+            "chat_id": chat_id,
+            "text": escaped_text,
+            "parse_mode": parse_mode
+        }
+        if reply_to_message_id:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        
+        return await bot.send_message(**kwargs)
+    except Exception as e:
+        logger.warning(f"⚠️ MarkdownV2 не сработал, пробуем без форматирования: {e}")
     
-    for line in lines:
-        # Если строка начинается с ** (жирный текст от ИИ), обрабатываем аккуратно
-        if line.strip().startswith('**') and line.strip().endswith('**'):
-            # Это заголовок от ИИ - экранируем только символы внутри заголовка
-            inner_text = line[2:-2]  # Убираем **
-            escaped_inner = escape_markdown_v2(inner_text)
-            processed_lines.append(f"**{escaped_inner}**")
-        else:
-            # Обычный текст - просто экранируем
-            processed_lines.append(escape_markdown_v2(line))
+    # Попытка 2: Без форматирования
+    try:
+        kwargs = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": None
+        }
+        if reply_to_message_id:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        
+        return await bot.send_message(**kwargs)
+    except Exception as e:
+        logger.error(f"❌ Не удалось отправить сообщение вообще: {e}")
+        return None
+
+async def edit_safe_message(message: types.Message, text: str, parse_mode: str = "MarkdownV2") -> bool:
+    """
+    БЕЗОПАСНОЕ редактирование сообщений.
+    Возвращает True если успешно, False если нет.
+    """
+    # Попытка 1: С MarkdownV2
+    try:
+        escaped_text = escape_markdown_v2(text)
+        await message.edit_text(escaped_text, parse_mode=parse_mode)
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось отредактировать с MarkdownV2: {e}")
     
-    return '\n'.join(processed_lines)
+    # Попытка 2: Без форматирования
+    try:
+        await message.edit_text(text, parse_mode=None)
+        return True
+    except Exception as e:
+        logger.error(f"❌ Не удалось отредактировать сообщение вообще: {e}")
+        return False
 
 async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
-    """Отправляет длинное сообщение с правильным экранированием"""
-    # Подготавливаем текст для MarkdownV2
-    processed_text = prepare_for_markdown(text)
+    """
+    Отправка длинных сообщений с безопасным экранированием.
+    """
+    # Просто экранируем весь текст
+    escaped_text = escape_markdown_v2(text)
     
-    # Разбиваем на части если слишком длинное
-    if len(processed_text) > 3800:
-        parts = [processed_text[i:i+3800] for i in range(0, len(processed_text), 3800)]
+    # Разбиваем если слишком длинное
+    if len(escaped_text) > 3800:
+        parts = [escaped_text[i:i+3800] for i in range(0, len(escaped_text), 3800)]
     else:
-        parts = [processed_text]
+        parts = [escaped_text]
     
     for i, part in enumerate(parts):
-        max_attempts = 2
-        for attempt in range(max_attempts):
+        try:
+            kwargs = {
+                "chat_id": chat_id,
+                "text": part,
+                "parse_mode": "MarkdownV2"
+            }
+            
+            if i == 0 and reply_to_message_id:
+                kwargs["reply_to_message_id"] = reply_to_message_id
+            
+            await bot.send_message(**kwargs)
+            
+            if i < len(parts) - 1:
+                await asyncio.sleep(0.3)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка при отправке части {i+1}: {e}")
+            # Фоллбэк без форматирования
             try:
-                send_kwargs = {
+                plain_kwargs = {
                     "chat_id": chat_id,
-                    "text": part,
-                    "parse_mode": "MarkdownV2"
+                    "text": f"Часть {i+1}:\n\n{part[:1000]}",
+                    "parse_mode": None
                 }
                 
                 if i == 0 and reply_to_message_id:
-                    send_kwargs["reply_to_message_id"] = reply_to_message_id
+                    plain_kwargs["reply_to_message_id"] = reply_to_message_id
                 
-                await bot.send_message(**send_kwargs)
-                break  # Успешно отправили, выходим из цикла попыток
-                
-            except Exception as e:
-                logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка при отправке части: {e}")
-                
-                if attempt == max_attempts - 1:  # Последняя попытка
-                    # Фоллбэк: отправляем без форматирования
-                    try:
-                        # Убираем экранирование и Markdown разметку для plain text
-                        plain_text = re.sub(r'\\([_*\[\]()~`>#+\-=|{}.!])', r'\1', part)
-                        plain_text = re.sub(r'\*\*(.*?)\*\*', r'\1', plain_text)  # Убираем **жирный**
-                        plain_text = re.sub(r'__(.*?)__', r'\1', plain_text)  # Убираем __подчеркивание__
-                        plain_text = re.sub(r'`(.*?)`', r'\1', plain_text)  # Убираем `код`
-                        
-                        fallback_kwargs = {
-                            "chat_id": chat_id,
-                            "text": f"Часть {i+1}:\n\n{plain_text[:1000]}",
-                            "parse_mode": None
-                        }
-                        
-                        if i == 0 and reply_to_message_id:
-                            fallback_kwargs["reply_to_message_id"] = reply_to_message_id
-                            
-                        await bot.send_message(**fallback_kwargs)
-                    except Exception as e2:
-                        logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
-                
-                await asyncio.sleep(0.5)  # Небольшая задержка перед повторной попыткой
-        
-        if i < len(parts) - 1:
-            await asyncio.sleep(0.3)
-
-async def send_simple_message(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
-    """Универсальная функция для отправки простых сообщений"""
-    max_attempts = 2
-    for attempt in range(max_attempts):
-        try:
-            escaped_text = escape_markdown_v2(text)
-            return await bot.send_message(
-                chat_id=chat_id,
-                text=escaped_text,
-                parse_mode="MarkdownV2",
-                reply_to_message_id=reply_to_message_id
-            )
-        except Exception as e:
-            logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка отправки сообщения: {e}")
-            
-            if attempt == max_attempts - 1:  # Последняя попытка
-                # Фоллбэк без форматирования
-                try:
-                    return await bot.send_message(
-                        chat_id=chat_id,
-                        text=text,
-                        parse_mode=None,
-                        reply_to_message_id=reply_to_message_id
-                    )
-                except Exception as e2:
-                    logger.error(f"❌ Не удалось отправить сообщение вообще: {e2}")
-                    return None
-            
-            await asyncio.sleep(0.5)
+                await bot.send_message(**plain_kwargs)
+            except Exception as e2:
+                logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
 
 # ==================== СИСТЕМНЫЕ ПРОМПТЫ ====================
 SYSTEM_PROMPT_MAIN = {
@@ -191,7 +182,7 @@ SYSTEM_PROMPT_MAIN = {
     "content": (
         "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
         "Отвечай ясно, по делу, с технической точностью. "
-        "Используй Markdown для форматирования: **жирный** для ключевых терминов."
+        "НЕ используй Markdown разметку в ответах."
     )
 }
 
@@ -200,7 +191,7 @@ SYSTEM_PROMPT_DEEPSEEK = {
     "content": (
         "Ты — технический аналитик. Ответь на вопрос пользователя самостоятельно, "
         "предоставив глубокий анализ, конкретные детали и практические шаги. "
-        "Используй Markdown для форматирования: **жирный**, `код`, ### заголовки. "
+        "НЕ используй Markdown разметку в ответах. "
         "Будь максимально конкретным и техничным."
     )
 }
@@ -225,8 +216,8 @@ async def ask_openrouter(user_question: str, model: str, system_prompt: dict, co
     }
     
     model_name = model.split('/')[-1] if '/' in model else model
+    logger.info(f"🚀 Запрос к {model_name}...")
     
-    # Увеличенные таймауты для стабильности
     timeout_seconds = 150 if "deepseek" in model.lower() else 100
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     
@@ -279,14 +270,12 @@ async def get_responses_parallel(user_question: str) -> Tuple[Optional[str], Opt
         )
     )
     
-    # Ждём оба ответа параллельно
     llama_response, deepseek_response = await asyncio.gather(
         llama_task, 
         deepseek_task,
         return_exceptions=True
     )
     
-    # Обработка исключений
     if isinstance(llama_response, Exception):
         logger.error(f"❌ Исключение в Llama: {llama_response}")
         llama_response = None
@@ -307,18 +296,7 @@ async def cmd_start(message: types.Message):
         "⚡ Оба ответа генерируются одновременно!\n\n"
         "❓ Просто задайте вопрос с '?' в конце"
     )
-    await send_simple_message(message.chat.id, welcome_text, message.message_id)
-
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    help_text = (
-        "📖 Помощь\n\n"
-        "Бот использует **две модели параллельно**:\n"
-        "1️⃣ Llama отвечает первым (5-10с)\n"
-        "2️⃣ DeepSeek добавляет анализ (10-15с)\n\n"
-        "💡 Совет: Сложные технические вопросы получают лучший анализ!"
-    )
-    await send_simple_message(message.chat.id, help_text, message.message_id)
+    await send_safe_message(message.chat.id, welcome_text, message.message_id)
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
 async def handle_question(message: types.Message):
@@ -333,7 +311,11 @@ async def handle_question(message: types.Message):
     try:
         # ШАГ 1: Уведомление о начале обработки
         processing_text = "🤔 Две модели ИИ анализируют вопрос параллельно..."
-        processing_msg = await send_simple_message(chat_id, processing_text, message.message_id)
+        processing_msg = await send_safe_message(chat_id, processing_text, message.message_id)
+        
+        if not processing_msg:
+            logger.error("❌ Не удалось отправить уведомление о начале обработки")
+            return
         
         start_total_time = time.time()
         
@@ -348,24 +330,18 @@ async def handle_question(message: types.Message):
             llama_time = time.time() - start_total_time
             logger.info(f"📤 Отправка ответа Llama (за {llama_time:.1f}с)...")
             
-            if processing_msg:
-                await processing_msg.edit_text(
-                    "✅ Llama ответил! Готовим анализ DeepSeek...",
-                    parse_mode="MarkdownV2"
-                )
+            # БЕЗОПАСНОЕ редактирование статусного сообщения
+            status_text = "✅ Llama ответил! Готовим анализ DeepSeek..."
+            await edit_safe_message(processing_msg, status_text)
             
             await send_long_message(
                 chat_id=chat_id,
-                text=f"**🤖 Ответ Llama 3.3:**\n\n{llama_response}",
+                text=f"🤖 Ответ Llama 3.3:\n\n{llama_response}",
                 reply_to_message_id=message.message_id
             )
         else:
             logger.error("❌ Llama не ответил")
-            if processing_msg:
-                await processing_msg.edit_text(
-                    "❌ Основная модель не ответила. Попробуйте позже.",
-                    parse_mode="MarkdownV2"
-                )
+            await edit_safe_message(processing_msg, "❌ Основная модель не ответила. Попробуйте позже.")
             return
         
         # ШАГ 4: ПОТОМ ОТПРАВЛЯЕМ ОТВЕТ DEEPSEEK (ЕСЛИ ЕСТЬ)
@@ -373,7 +349,7 @@ async def handle_question(message: types.Message):
             logger.info("📤 Отправка ответа DeepSeek...")
             await send_long_message(
                 chat_id=chat_id,
-                text=f"**🔍 Глубокий анализ DeepSeek R1:**\n\n{deepseek_response}",
+                text=f"🔍 Глубокий анализ DeepSeek R1:\n\n{deepseek_response}",
                 reply_to_message_id=message.message_id
             )
             
@@ -385,12 +361,9 @@ async def handle_question(message: types.Message):
                 f"🔍 DeepSeek: {len(deepseek_response)} символов"
             )
             
-            if processing_msg:
-                await processing_msg.edit_text(completion_text, parse_mode="MarkdownV2")
-            else:
-                await send_simple_message(chat_id, completion_text)
-            
+            await edit_safe_message(processing_msg, completion_text)
             logger.info(f"✅ Успешно! Время: {total_time:.1f}с")
+            
         else:
             # Если DeepSeek не ответил
             logger.warning("⚠️ DeepSeek не вернул ответ")
@@ -401,23 +374,18 @@ async def handle_question(message: types.Message):
                 f"ℹ️ DeepSeek временно недоступен"
             )
             
-            if processing_msg:
-                await processing_msg.edit_text(fallback_text, parse_mode="MarkdownV2")
+            await edit_safe_message(processing_msg, fallback_text)
         
     except asyncio.TimeoutError:
         logger.error("⏱️ Общий таймаут обработки")
-        timeout_text = "⏱️ Время обработки истекло. Попробуйте позже."
         if processing_msg:
-            await processing_msg.edit_text(timeout_text, parse_mode="MarkdownV2")
-        else:
-            await send_simple_message(chat_id, timeout_text, message.message_id)
+            await edit_safe_message(processing_msg, "⏱️ Время обработки истекло. Попробуйте позже.")
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
         error_text = f"⚠️ Ошибка обработки: {str(e)[:200]}"
         if processing_msg:
-            await processing_msg.edit_text(error_text, parse_mode="MarkdownV2")
-        else:
-            await send_simple_message(chat_id, error_text, message.message_id)
+            # Важно: при ошибке используем send_safe_message, а не edit_safe_message
+            await send_safe_message(chat_id, error_text)
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
