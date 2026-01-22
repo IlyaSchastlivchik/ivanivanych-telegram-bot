@@ -61,197 +61,197 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 # ==================== УТИЛИТЫ ЭКРАНИРОВАНИЯ И ОЧИСТКИ ====================
-def clean_text_preserve_code(text: str) -> str:
+def clean_text_safe(text: str) -> str:
     """
-    Очищает текст от битых символов, но СОХРАНЯЕТ форматирование кода.
-    Не удаляет обратные кавычки ``` и символы внутри блоков кода.
+    Безопасная очистка текста - только удаляем опасные символы.
+    НЕ трогаем обратные кавычки и символы внутри блоков кода.
     """
     if not text:
         return ""
     
-    # Сначала находим и защищаем блоки кода
-    code_blocks = []
+    # Находим и защищаем блоки кода с ```
+    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
     
-    # Находим все блоки кода с ```
-    pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
-    matches = list(re.finditer(pattern, text))
+    def protect_code_block(match):
+        code_content = match.group(0)  # Весь блок кода
+        # Очищаем только опасные символы внутри содержимого кода
+        inner_content = match.group(1)
+        # Заменяем только нулевые символы и другие опасные управляющие символы
+        cleaned_inner = ''.join(char for char in inner_content 
+                               if unicodedata.category(char)[0] != 'C' 
+                               or char == '\n' or char == '\t' or char == '\r')
+        cleaned_inner = cleaned_inner.replace('\u0000', '').replace('\u0001', '').replace('\u0002', '')
+        cleaned_inner = cleaned_inner.replace('\u0003', '').replace('\u0004', '').replace('\u0005', '')
+        # Восстанавливаем блок кода
+        language = match.group(0)[3:].split('\n')[0].strip()
+        if language and language != '```':
+            return f"```{language}\n{cleaned_inner}\n```"
+        else:
+            return f"```\n{cleaned_inner}\n```"
     
-    # Заменяем блоки кода на плейсхолдеры
-    for i, match in enumerate(matches):
-        code_block = match.group(0)
-        placeholder = f"__CODE_BLOCK_{i}__"
-        code_blocks.append((placeholder, code_block))
-        text = text.replace(code_block, placeholder, 1)
+    # Обрабатываем блоки кода
+    text = re.sub(code_block_pattern, protect_code_block, text)
     
-    # Теперь находим inline код с `
-    inline_pattern = r'`([^`\n]+)`'
-    inline_matches = list(re.finditer(inline_pattern, text))
+    # Теперь обрабатываем оставшийся текст (вне блоков кода)
+    # Удаляем опасные управляющие символы
+    text = ''.join(char for char in text if unicodedata.category(char)[0] != 'C' 
+                  or char == '\n' or char == '\t' or char == '\r' or char == '`')
     
-    for i, match in enumerate(inline_matches):
-        inline_code = match.group(0)
-        placeholder = f"__INLINE_CODE_{i}__"
-        code_blocks.append((placeholder, inline_code))
-        text = text.replace(inline_code, placeholder, 1)
+    # Удаляем конкретные опасные символы
+    dangerous_chars = ['\u0000', '\u0001', '\u0002', '\u0003', '\u0004', '\u0005',
+                      '\u0006', '\u0007', '\u0008', '\u000b', '\u000c',
+                      '\u000e', '\u000f', '\u0010', '\u0011', '\u0012',
+                      '\u0013', '\u0014', '\u0015', '\u0016', '\u0017',
+                      '\u0018', '\u0019', '\u001a', '\u001b', '\u001c',
+                      '\u001d', '\u001e', '\u001f', '\u200b', '\u200c',
+                      '\u200d', '\ufeff']
     
-    # Теперь очищаем основной текст (без блоков кода)
-    # Удаляем нулевые символы и другие опасные управляющие символы
-    text = ''.join(char for char in text if unicodedata.category(char)[0] != 'C' or char == '\n' or char == '\t')
-    
-    # Заменяем проблемные символы (но не удаляем обратные кавычки!)
-    replacements = {
-        '\u200b': '',  # Zero-width space
-        '\u200c': '',  # Zero-width non-joiner
-        '\u200d': '',  # Zero-width joiner
-        '\ufeff': '',  # Zero-width no-break space (BOM)
-        '\u2028': '\n',  # Line separator
-        '\u2029': '\n\n',  # Paragraph separator
-        '\u0000': '',  # Null character
-    }
-    
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    
-    # Нормализуем юникод
-    text = unicodedata.normalize('NFKC', text)
-    
-    # Восстанавливаем блоки кода
-    for placeholder, code_block in code_blocks:
-        text = text.replace(placeholder, code_block)
+    for char in dangerous_chars:
+        text = text.replace(char, '')
     
     return text
 
-def escape_markdown_v2_preserve_code(text: str) -> str:
+def escape_markdown_v2_final(text: str) -> str:
     """
-    Экранирует текст для MarkdownV2, но НЕ экранирует внутри блоков кода.
+    ФИНАЛЬНАЯ версия экранирования MarkdownV2.
+    Правильно обрабатывает блоки кода.
     """
-    # Очищаем текст, но сохраняем код
-    text = clean_text_preserve_code(text)
+    # Очищаем опасные символы
+    text = clean_text_safe(text)
     
-    # Находим и защищаем блоки кода
+    # ШАГ 1: Находим и защищаем блоки кода
     code_blocks = []
+    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
     
-    # Блоки кода с ```
-    pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
-    matches = list(re.finditer(pattern, text))
-    
-    for i, match in enumerate(matches):
-        code_block = match.group(0)
-        placeholder = f"__CODE_BLOCK_{i}__"
-        code_blocks.append((placeholder, code_block))
-        text = text.replace(code_block, placeholder, 1)
-    
-    # Inline код с `
-    inline_pattern = r'`([^`\n]+)`'
-    inline_matches = list(re.finditer(inline_pattern, text))
-    
-    for i, match in enumerate(inline_matches):
-        inline_code = match.group(0)
-        placeholder = f"__INLINE_CODE_{i}__"
-        code_blocks.append((placeholder, inline_code))
-        text = text.replace(inline_code, placeholder, 1)
-    
-    # Экранируем основной текст
-    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    
-    # Экранируем обратные слеши (но не те, что в начале `)
-    text = re.sub(r'(?<!`)``(?!`)|(?<!`)`(?!`)', lambda m: m.group(0), text)  # Защищаем `
-    text = text.replace('\\', '\\\\')
-    
-    for char in chars_to_escape:
-        text = text.replace(char, '\\' + char)
-    
-    # Восстанавливаем блоки кода (они уже не будут экранированы)
-    for placeholder, code_block in code_blocks:
-        text = text.replace(placeholder, code_block)
-    
-    return text
-
-def split_message_smart(text: str, max_length: int = 3000) -> List[str]:
-    """
-    Умное разбиение сообщения на части с сохранением блоков кода.
-    """
-    if len(text) <= max_length:
-        return [text]
-    
-    # Защищаем блоки кода перед разбиением
-    code_blocks = []
-    pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
-    
-    def replace_code(match):
+    def replace_code_block(match):
         placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
         code_blocks.append((placeholder, match.group(0)))
         return placeholder
     
-    text_with_placeholders = re.sub(pattern, replace_code, text)
+    # Заменяем блоки кода на плейсхолдеры
+    text = re.sub(code_block_pattern, replace_code_block, text)
     
-    parts = []
-    current_part = ""
+    # ШАГ 2: Находим и защищаем inline код
+    inline_code_blocks = []
+    inline_pattern = r'`([^`\n]+)`'
     
-    # Разбиваем по абзацам
-    paragraphs = text_with_placeholders.split('\n\n')
+    def replace_inline_code(match):
+        placeholder = f"__INLINE_CODE_{len(inline_code_blocks)}__"
+        inline_code_blocks.append((placeholder, match.group(0)))
+        return placeholder
     
-    for para in paragraphs:
-        # Восстанавливаем код в параграфе для проверки длины
-        para_with_code = para
-        for placeholder, code_block in code_blocks:
-            if placeholder in para_with_code:
-                # Заменяем плейсхолдер на код для точного подсчёта длины
-                temp_para = para_with_code.replace(placeholder, code_block)
-                if len(current_part) + len(temp_para) + 2 <= max_length:
-                    para_with_code = temp_para
-                else:
-                    # Код не помещается, оставляем плейсхолдер
-                    pass
-        
-        if len(para_with_code) > max_length:
-            # Разбиваем длинный параграф
-            lines = para_with_code.split('\n')
-            for line in lines:
-                if len(line) > max_length:
-                    # Очень длинная строка - разбиваем по словам
-                    words = line.split(' ')
-                    for word in words:
-                        if len(current_part) + len(word) + 1 <= max_length:
-                            current_part += word + " "
-                        else:
-                            if current_part:
-                                parts.append(current_part.strip())
-                            current_part = word + " "
-                elif len(current_part) + len(line) + 1 <= max_length:
-                    current_part += line + "\n"
-                else:
-                    if current_part:
-                        parts.append(current_part.strip())
-                    current_part = line + "\n"
-        elif len(current_part) + len(para_with_code) + 2 <= max_length:
-            current_part += para_with_code + "\n\n"
-        else:
-            if current_part:
-                parts.append(current_part.strip())
-            current_part = para_with_code + "\n\n"
+    text = re.sub(inline_pattern, replace_inline_code, text)
     
-    if current_part:
-        parts.append(current_part.strip())
+    # ШАГ 3: Экранируем оставшийся текст (НЕ блоки кода)
+    # Экранируем обратные слеши
+    text = text.replace('\\', '\\\\')
     
-    # Восстанавливаем блоки кода в каждой части
-    final_parts = []
-    for part in parts:
-        restored_part = part
-        for placeholder, code_block in code_blocks:
-            if placeholder in restored_part:
-                restored_part = restored_part.replace(placeholder, code_block)
-        final_parts.append(restored_part)
+    # Экранируем остальные спецсимволы MarkdownV2
+    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     
-    return final_parts
+    # Важно: НЕ экранируем обратную кавычку `
+    for char in chars_to_escape:
+        text = text.replace(char, '\\' + char)
+    
+    # ШАГ 4: Восстанавливаем inline код
+    for placeholder, inline_code in inline_code_blocks:
+        text = text.replace(placeholder, inline_code)
+    
+    # ШАГ 5: Восстанавливаем блоки кода
+    for placeholder, code_block in code_blocks:
+        text = text.replace(placeholder, code_block)
+    
+    return text
 
-async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = None, 
-                           parse_mode: str = "MarkdownV2") -> Optional[types.Message]:
+def split_message_smart_final(text: str, max_length: int = 3500) -> List[str]:
     """
-    БЕЗОПАСНАЯ отправка сообщений с автоматическим fallback.
+    ФИНАЛЬНАЯ версия разбиения сообщений.
+    Не разбивает блоки кода.
     """
-    # Попытка 1: С MarkdownV2 с сохранением кода
+    if len(text) <= max_length:
+        return [text]
+    
+    # Находим блоки кода
+    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
+    code_matches = list(re.finditer(code_block_pattern, text))
+    
+    if not code_matches:
+        # Нет блоков кода - простое разбиение
+        parts = []
+        current = ""
+        paragraphs = text.split('\n\n')
+        
+        for para in paragraphs:
+            if len(current) + len(para) + 2 <= max_length:
+                current += para + "\n\n"
+            else:
+                if current:
+                    parts.append(current.strip())
+                current = para + "\n\n"
+        
+        if current:
+            parts.append(current.strip())
+        
+        return parts
+    
+    # Есть блоки кода - разбиваем аккуратно
+    parts = []
+    current_pos = 0
+    
+    for match in code_matches:
+        code_start = match.start()
+        code_end = match.end()
+        code_block = match.group(0)
+        
+        # Текст до блока кода
+        text_before = text[current_pos:code_start]
+        if text_before:
+            # Разбиваем текст до блока кода
+            text_parts = split_message_smart_final(text_before, max_length)
+            if text_parts:
+                if parts:
+                    parts[-1] += text_parts[0]
+                    parts.extend(text_parts[1:])
+                else:
+                    parts.extend(text_parts)
+        
+        # Добавляем блок кода
+        if parts and len(parts[-1]) + len(code_block) <= max_length:
+            parts[-1] += code_block
+        else:
+            parts.append(code_block)
+        
+        current_pos = code_end
+    
+    # Текст после последнего блока кода
+    text_after = text[current_pos:]
+    if text_after:
+        text_parts = split_message_smart_final(text_after, max_length)
+        if text_parts:
+            if parts and len(parts[-1]) + len(text_parts[0]) <= max_length:
+                parts[-1] += text_parts[0]
+                parts.extend(text_parts[1:])
+            else:
+                parts.extend(text_parts)
+    
+    return parts
+
+async def send_safe_message_final(chat_id: int, text: str, reply_to_message_id: int = None, 
+                                 parse_mode: str = "MarkdownV2") -> Optional[types.Message]:
+    """
+    ФИНАЛЬНАЯ версия отправки сообщений.
+    """
+    # Попытка 1: С MarkdownV2 и правильным экранированием
     try:
-        escaped_text = escape_markdown_v2_preserve_code(text)
+        escaped_text = escape_markdown_v2_final(text)
+        
+        # Проверяем наличие незакрытых блоков кода
+        backtick_count = escaped_text.count('`')
+        if backtick_count % 2 != 0:
+            logger.warning(f"⚠️ Нечётное количество обратных кавычек: {backtick_count}")
+            # Добавляем недостающую кавычку в конец
+            escaped_text += '`'
+        
         kwargs = {
             "chat_id": chat_id,
             "text": escaped_text,
@@ -260,14 +260,42 @@ async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = 
         if reply_to_message_id:
             kwargs["reply_to_message_id"] = reply_to_message_id
         
-        return await bot.send_message(**kwargs)
+        result = await bot.send_message(**kwargs)
+        logger.info(f"✅ Сообщение отправлено с MarkdownV2, длина: {len(escaped_text)} символов")
+        return result
+        
     except Exception as e:
-        logger.warning(f"⚠️ MarkdownV2 не сработал, пробуем без форматирования: {e}")
+        error_msg = str(e)
+        logger.warning(f"⚠️ MarkdownV2 не сработал: {error_msg}")
+        
+        # Анализируем ошибку
+        if "PreCode" in error_msg or "can't parse" in error_msg:
+            logger.warning("⚠️ Проблема с блоками кода, пробуем альтернативный метод...")
+            # Попытка 1.5: Отправляем с HTML разметкой для кода
+            try:
+                # Преобразуем блоки кода в HTML
+                html_text = text
+                html_text = re.sub(r'```(?:[\w]*)\n([\s\S]*?)\n```', 
+                                 r'<pre><code>\1</code></pre>', html_text)
+                html_text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', html_text)
+                
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": html_text,
+                    "parse_mode": "HTML"
+                }
+                if reply_to_message_id:
+                    kwargs["reply_to_message_id"] = reply_to_message_id
+                
+                result = await bot.send_message(**kwargs)
+                logger.info("✅ Сообщение отправлено с HTML форматированием")
+                return result
+            except Exception as html_e:
+                logger.warning(f"⚠️ HTML тоже не сработал: {html_e}")
     
     # Попытка 2: Без форматирования
     try:
-        # Очищаем, но сохраняем читаемость кода
-        cleaned_text = clean_text_preserve_code(text)
+        cleaned_text = clean_text_safe(text)
         kwargs = {
             "chat_id": chat_id,
             "text": cleaned_text,
@@ -276,130 +304,54 @@ async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = 
         if reply_to_message_id:
             kwargs["reply_to_message_id"] = reply_to_message_id
         
-        return await bot.send_message(**kwargs)
+        result = await bot.send_message(**kwargs)
+        logger.info("✅ Сообщение отправлено без форматирования")
+        return result
+        
     except Exception as e:
         logger.error(f"❌ Не удалось отправить сообщение вообще: {e}")
         return None
 
-async def edit_safe_message(message: types.Message, text: str, parse_mode: str = "MarkdownV2") -> bool:
+async def send_long_message_final(chat_id: int, text: str, reply_to_message_id: int = None):
     """
-    БЕЗОПАСНОЕ редактирование сообщений.
-    """
-    # Попытка 1: С MarkdownV2
-    try:
-        escaped_text = escape_markdown_v2_preserve_code(text)
-        await message.edit_text(escaped_text, parse_mode=parse_mode)
-        return True
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось отредактировать с MarkdownV2: {e}")
-    
-    # Попытка 2: Без форматирования
-    try:
-        cleaned_text = clean_text_preserve_code(text)
-        await message.edit_text(cleaned_text, parse_mode=None)
-        return True
-    except Exception as e:
-        logger.error(f"❌ Не удалось отредактировать сообщение вообще: {e}")
-        return False
-
-async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
-    """
-    Отправка длинных сообщений с правильным разбиением на части и сохранением кода.
+    ФИНАЛЬНАЯ версия отправки длинных сообщений.
     """
     original_length = len(text)
     logger.info(f"📤 Подготовка сообщения длиной {original_length} символов...")
     
-    # Экранируем с сохранением кода
-    escaped_text = escape_markdown_v2_preserve_code(text)
-    escaped_length = len(escaped_text)
-    logger.info(f"📤 После экранирования: {escaped_length} символов (увеличилось на {escaped_length - original_length} символов)")
-    
     # Проверяем наличие блоков кода
-    code_block_count = len(re.findall(r'```[\w]*\n[\s\S]*?\n```', escaped_text))
-    inline_code_count = len(re.findall(r'`[^`\n]+`', escaped_text))
-    logger.info(f"📤 Найдено блоков кода: {code_block_count}, inline кода: {inline_code_count}")
+    code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', text)
+    inline_codes = re.findall(r'`[^`\n]+`', text)
+    logger.info(f"📤 Блоков кода найдено: {len(code_blocks)}, inline кода: {len(inline_codes)}")
     
-    # Разбиваем на части с сохранением кода
-    parts = split_message_smart(escaped_text, max_length=3500)
+    if code_blocks:
+        for i, block in enumerate(code_blocks[:2]):
+            logger.info(f"📤 Блок кода {i+1}: {block[:50]}...")
+    
+    # Разбиваем сообщение
+    parts = split_message_smart_final(text, max_length=3500)
     logger.info(f"📤 Разбито на {len(parts)} частей")
     
     for i, part in enumerate(parts):
         part_length = len(part)
         logger.info(f"📤 Часть {i+1}/{len(parts)}: {part_length} символов")
         
-        # Проверяем наличие кода в этой части
-        has_code_block = '```' in part
-        if has_code_block:
-            logger.info(f"📤 Часть {i+1} содержит блок кода")
+        # Проверяем блоки кода в этой части
+        part_code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', part)
+        if part_code_blocks:
+            logger.info(f"📤 Часть {i+1} содержит {len(part_code_blocks)} блок(ов) кода")
         
-        max_attempts = 2
+        # Отправляем с правильным методом
+        message = await send_safe_message_final(
+            chat_id=chat_id,
+            text=part,
+            reply_to_message_id=reply_to_message_id if i == 0 else None
+        )
         
-        for attempt in range(max_attempts):
-            try:
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": part,
-                    "parse_mode": "MarkdownV2"
-                }
-                
-                if i == 0 and reply_to_message_id:
-                    kwargs["reply_to_message_id"] = reply_to_message_id
-                
-                await bot.send_message(**kwargs)
-                logger.info(f"✅ Часть {i+1}/{len(parts)} отправлена успешно")
-                break  # Успешно отправили
-                
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка при отправке части {i+1}: {error_msg}")
-                
-                # Если ошибка связана с парсингом Markdown, пробуем отправить без форматирования
-                if "can't parse" in error_msg.lower() or "bad request" in error_msg.lower() or "400" in error_msg:
-                    logger.warning(f"⚠️ Проблема с Markdown, отправляем часть {i+1} без форматирования")
-                    try:
-                        # Для plain text просто очищаем
-                        plain_text = clean_text_preserve_code(part)
-                        
-                        plain_kwargs = {
-                            "chat_id": chat_id,
-                            "text": f"Часть {i+1}/{len(parts)}:\n\n{plain_text}",
-                            "parse_mode": None
-                        }
-                        
-                        if i == 0 and reply_to_message_id:
-                            plain_kwargs["reply_to_message_id"] = reply_to_message_id
-                        
-                        await bot.send_message(**plain_kwargs)
-                        logger.info(f"✅ Часть {i+1}/{len(parts)} отправлена без форматирования")
-                        break
-                    except Exception as e2:
-                        logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
-                
-                elif "message is too long" in error_msg.lower():
-                    logger.warning(f"⚠️ Часть {i+1} слишком длинная, разбиваем ещё")
-                    # Рекурсивно разбиваем эту часть
-                    sub_parts = split_message_smart(part, max_length=3000)
-                    for j, sub_part in enumerate(sub_parts):
-                        try:
-                            sub_kwargs = {
-                                "chat_id": chat_id,
-                                "text": sub_part,
-                                "parse_mode": "MarkdownV2"
-                            }
-                            
-                            if i == 0 and j == 0 and reply_to_message_id:
-                                sub_kwargs["reply_to_message_id"] = reply_to_message_id
-                            
-                            await bot.send_message(**sub_kwargs)
-                            logger.info(f"✅ Подчасть {j+1}/{len(sub_parts)} части {i+1} отправлена")
-                        except Exception as sub_e:
-                            logger.error(f"❌ Ошибка отправки подчасти: {sub_e}")
-                    break
-                
-                if attempt == max_attempts - 1:  # Последняя попытка
-                    logger.error(f"❌ Не удалось отправить часть {i+1} после всех попыток")
-                
-                await asyncio.sleep(0.5)
+        if message:
+            logger.info(f"✅ Часть {i+1}/{len(parts)} отправлена")
+        else:
+            logger.error(f"❌ Не удалось отправить часть {i+1}/{len(parts)}")
         
         if i < len(parts) - 1:
             await asyncio.sleep(0.3)
@@ -410,11 +362,11 @@ SYSTEM_PROMPT_MAIN = {
     "content": (
         "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
         "Отвечай ясно, по делу, с технической точностью. "
-        "Используй Markdown для форматирования: **жирный** для ключевых терминов, ```код``` для примеров кода. "
-        "Пример кода должен быть в тройных обратных кавычках с указанием языка:"
-        "```python\nкод на питоне\n```"
+        "Используй Markdown для форматирования: **жирный** для ключевых терминов. "
+        "Если даёшь пример кода, используй ТРОЙНЫЕ обратные кавычки с указанием языка:"
+        "```python\nprint('Пример кода')\n```"
+        "Важно: всегда закрывай блок кода тремя обратными кавычками ```"
         "НЕ используй LaTeX (\\( \\)) или специальные символы в ответах. "
-        "Избегай использования нестандартных юникод-символов. "
         "Длина ответа не должна превышать 1200 символов."
     )
 }
@@ -424,11 +376,12 @@ SYSTEM_PROMPT_DEEPSEEK = {
     "content": (
         "Ты — технический аналитик. Ответь на вопрос пользователя самостоятельно, "
         "предоставив глубокий анализ, конкретные детали и практические шаги. "
-        "ИСПОЛЬЗУЙ Markdown для форматирования: **жирный** для заголовков, ```код``` для примеров кода. "
-        "Когда даёшь пример кода, всегда используй тройные обратные кавычки с указанием языка:"
-        "```python\nimport requests\nresponse = requests.get(url)\n```"
+        "ИСПОЛЬЗУЙ Markdown для форматирования: **жирный** для заголовков. "
+        "Если даёшь пример кода, ОБЯЗАТЕЛЬНО используй тройные обратные кавычки:"
+        "```python\nimport requests\n```"
+        "ВСЕГДА закрывай блок кода тремя обратными кавычками ```"
+        "Проверяй, что количество обратных кавычек ` в твоём ответе чётное. "
         "НЕ используй LaTeX (\\( \\)) или специальные символы в ответах. "
-        "Избегай использования нестандартных юникод-символов. "
         "Длина ответа не должна превышать 1200 символов. "
         "Будь максимально конкретным и техничным."
     )
@@ -469,13 +422,14 @@ async def ask_openrouter(user_question: str, model: str, system_prompt: dict, co
                     result = await response.json()
                     if 'choices' in result and len(result['choices']) > 0:
                         response_text = result['choices'][0]['message'].get('content', '').strip()
-                        # Очищаем, но сохраняем код
-                        response_text = clean_text_preserve_code(response_text)
-                        logger.info(f"✅ {model_name} ответил за {elapsed:.1f}с, {len(response_text)} символов")
+                        # Проверяем блоки кода
+                        backtick_count = response_text.count('`')
+                        if backtick_count % 2 != 0:
+                            logger.warning(f"⚠️ {model_name} вернул нечётное количество кавычек: {backtick_count}")
+                            # Добавляем недостающую кавычку
+                            response_text += '`'
                         
-                        # Проверяем наличие кода в ответе
-                        if '```' in response_text:
-                            logger.info(f"📝 {model_name} вернул ответ с кодом")
+                        logger.info(f"✅ {model_name} ответил за {elapsed:.1f}с, {len(response_text)} символов, кавычек: {backtick_count}")
                         
                         return response_text
                     else:
@@ -539,12 +493,12 @@ async def cmd_start(message: types.Message):
         "• Llama 3.3 — быстрый основной ответ\n"
         "• DeepSeek R1 — глубокий технический анализ\n\n"
         "⚡ Оба ответа генерируются одновременно!\n\n"
-        "💻 *Теперь с подсветкой кода!*\n"
-        "Модели могут возвращать код с форматированием:\n"
+        "💻 *Теперь с работающей подсветкой кода!*\n"
+        "Пример кода будет отображаться с форматированием:\n"
         "```python\nprint('Привет, мир!')\n```\n\n"
         "❓ Просто задайте вопрос с '?' в конце"
     )
-    await send_safe_message(message.chat.id, welcome_text, message.message_id)
+    await send_safe_message_final(message.chat.id, welcome_text, message.message_id)
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
 async def handle_question(message: types.Message):
@@ -559,7 +513,7 @@ async def handle_question(message: types.Message):
     try:
         # ШАГ 1: Уведомление о начале обработки
         processing_text = "🤔 Две модели ИИ анализируют вопрос параллельно..."
-        processing_msg = await send_safe_message(chat_id, processing_text, message.message_id)
+        processing_msg = await send_safe_message_final(chat_id, processing_text, message.message_id)
         
         if not processing_msg:
             logger.error("❌ Не удалось отправить уведомление о начале обработки")
@@ -577,38 +531,30 @@ async def handle_question(message: types.Message):
         if llama_response:
             llama_time = time.time() - start_total_time
             logger.info(f"📤 Отправка ответа Llama (за {llama_time:.1f}с)...")
-            logger.info(f"📊 Длина ответа Llama: {len(llama_response)} символов")
-            
-            # Проверяем наличие кода
-            if '```' in llama_response:
-                logger.info("📝 Ответ Llama содержит код")
             
             status_text = "✅ Llama ответил! Готовим анализ DeepSeek..."
-            await edit_safe_message(processing_msg, status_text)
+            await processing_msg.edit_text(status_text, parse_mode=None)
             
-            await send_long_message(
+            await send_long_message_final(
                 chat_id=chat_id,
                 text=f"🤖 Ответ Llama 3.3:\n\n{llama_response}",
                 reply_to_message_id=message.message_id
             )
         else:
             logger.error("❌ Llama не ответил")
-            await edit_safe_message(processing_msg, "❌ Основная модель не ответила. Попробуйте позже.")
+            await processing_msg.edit_text("❌ Основная модель не ответила. Попробуйте позже.", parse_mode=None)
             return
         
         # ШАГ 4: ПОТОМ ОТПРАВЛЯЕМ ОТВЕТ DEEPSEEK (ЕСЛИ ЕСТЬ)
         if deepseek_response and len(deepseek_response) > 50:
             logger.info("📤 Отправка ответа DeepSeek...")
-            logger.info(f"📊 Длина ответа DeepSeek: {len(deepseek_response)} символов")
             
-            # Проверяем наличие кода
-            code_blocks = re.findall(r'```[\w]*\n[\s\S]*?\n```', deepseek_response)
+            # Проверяем блоки кода
+            code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', deepseek_response)
             if code_blocks:
                 logger.info(f"📝 Ответ DeepSeek содержит {len(code_blocks)} блок(ов) кода")
-                for i, block in enumerate(code_blocks[:2]):  # Показываем первые 2 блока
-                    logger.info(f"📝 Блок кода {i+1}: {block[:100]}...")
             
-            await send_long_message(
+            await send_long_message_final(
                 chat_id=chat_id,
                 text=f"🔍 Глубокий анализ DeepSeek R1:\n\n{deepseek_response}",
                 reply_to_message_id=message.message_id
@@ -625,7 +571,7 @@ async def handle_question(message: types.Message):
             if code_blocks:
                 completion_text += f"\n💻 Код: {len(code_blocks)} блок(ов)"
             
-            await edit_safe_message(processing_msg, completion_text)
+            await processing_msg.edit_text(completion_text, parse_mode=None)
             logger.info(f"✅ Успешно! Время: {total_time:.1f}с")
             
         else:
@@ -637,17 +583,17 @@ async def handle_question(message: types.Message):
                 f"ℹ️ DeepSeek временно недоступен"
             )
             
-            await edit_safe_message(processing_msg, fallback_text)
+            await processing_msg.edit_text(fallback_text, parse_mode=None)
         
     except asyncio.TimeoutError:
         logger.error("⏱️ Общий таймаут обработки")
         if processing_msg:
-            await edit_safe_message(processing_msg, "⏱️ Время обработки истекло. Попробуйте позже.")
+            await processing_msg.edit_text("⏱️ Время обработки истекло. Попробуйте позже.", parse_mode=None)
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
         error_text = f"⚠️ Ошибка обработки: {str(e)[:200]}"
         if processing_msg:
-            await send_safe_message(chat_id, error_text)
+            await send_safe_message_final(chat_id, error_text)
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
@@ -656,7 +602,7 @@ async def main():
     logger.info(f"🚀 Бот IvanIvanych запускается...")
     logger.info(f"🤖 Модели: {OPENROUTER_MODEL_MAIN} + {OPENROUTER_MODEL_DEEPSEEK}")
     logger.info(f"⚡ Архитектура: Параллельная генерация")
-    logger.info(f"💻 Функция: Подсветка кода сохранена")
+    logger.info(f"💻 Функция: Работающая подсветка кода")
     logger.info("=" * 60)
     
     try:
