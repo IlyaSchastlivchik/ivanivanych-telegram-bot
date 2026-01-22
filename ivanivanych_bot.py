@@ -62,14 +62,31 @@ dp = Dispatcher()
 # ==================== УТИЛИТЫ ЭКРАНИРОВАНИЯ ====================
 def escape_markdown_v2(text: str) -> str:
     """
-    ПРОСТАЯ И НАДЁЖНАЯ функция экранирования для MarkdownV2.
-    Экранирует ВСЕ специальные символы без исключений.
+    НАДЁЖНОЕ экранирование ВСЕХ спецсимволов для MarkdownV2.
+    Экранирует обратные слеши и все спецсимволы Markdown.
     """
-    # Все символы, которые нужно экранировать в MarkdownV2
-    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    # Сначала экранируем обратные слеши
+    text = text.replace('\\', '\\\\')
     
+    # Затем экранируем все остальные спецсимволы MarkdownV2
+    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     for char in chars_to_escape:
         text = text.replace(char, '\\' + char)
+    
+    return text
+
+def clean_ai_response(text: str) -> str:
+    """
+    Очищает ответ от ИИ от LaTeX и сложной разметки.
+    Заменяет \\( и \\) на обычные скобки.
+    """
+    # Убираем LaTeX разметку
+    text = text.replace('\\[', '[')
+    text = text.replace('\\]', ']')
+    text = text.replace('\\=', '=')
+    
+    # Упрощаем Markdown
+    text = text.replace('**', '')  # Убираем жирный, так как он вызывает проблемы
     
     return text
 
@@ -77,7 +94,6 @@ async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = 
                            parse_mode: str = "MarkdownV2") -> Optional[types.Message]:
     """
     БЕЗОПАСНАЯ отправка сообщений с автоматическим fallback.
-    Всегда работает, даже если MarkdownV2 не сработает.
     """
     # Попытка 1: С MarkdownV2
     try:
@@ -112,7 +128,6 @@ async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = 
 async def edit_safe_message(message: types.Message, text: str, parse_mode: str = "MarkdownV2") -> bool:
     """
     БЕЗОПАСНОЕ редактирование сообщений.
-    Возвращает True если успешно, False если нет.
     """
     # Попытка 1: С MarkdownV2
     try:
@@ -134,8 +149,11 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
     """
     Отправка длинных сообщений с безопасным экранированием.
     """
-    # Просто экранируем весь текст
-    escaped_text = escape_markdown_v2(text)
+    # Очищаем текст от LaTeX и сложной разметки
+    cleaned_text = clean_ai_response(text)
+    
+    # Экранируем для MarkdownV2
+    escaped_text = escape_markdown_v2(cleaned_text)
     
     # Разбиваем если слишком длинное
     if len(escaped_text) > 3800:
@@ -163,9 +181,13 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
             logger.error(f"❌ Ошибка при отправке части {i+1}: {e}")
             # Фоллбэк без форматирования
             try:
+                # Убираем экранирование для plain text
+                plain_text = part.replace('\\\\', '\\')
+                plain_text = plain_text.replace('\\', '')
+                
                 plain_kwargs = {
                     "chat_id": chat_id,
-                    "text": f"Часть {i+1}:\n\n{part[:1000]}",
+                    "text": f"Часть {i+1}:\n\n{plain_text[:1000]}",
                     "parse_mode": None
                 }
                 
@@ -182,7 +204,8 @@ SYSTEM_PROMPT_MAIN = {
     "content": (
         "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
         "Отвечай ясно, по делу, с технической точностью. "
-        "НЕ используй Markdown разметку в ответах."
+        "НЕ используй Markdown разметку, LaTeX (\\( \\)) или специальные символы в ответах. "
+        "Используй только обычный текст."
     )
 }
 
@@ -191,7 +214,8 @@ SYSTEM_PROMPT_DEEPSEEK = {
     "content": (
         "Ты — технический аналитик. Ответь на вопрос пользователя самостоятельно, "
         "предоставив глубокий анализ, конкретные детали и практические шаги. "
-        "НЕ используй Markdown разметку в ответах. "
+        "НЕ используй Markdown разметку, LaTeX (\\( \\)) или специальные символы в ответах. "
+        "Используй только обычный текст. "
         "Будь максимально конкретным и техничным."
     )
 }
@@ -230,7 +254,7 @@ async def ask_openrouter(user_question: str, model: str, system_prompt: dict, co
                 if response.status == 200:
                     result = await response.json()
                     if 'choices' in result and len(result['choices']) > 0:
-                        response_text = result['choices'][0]['message']['content'].strip()
+                        response_text = result['choices'][0]['message'].get('content', '').strip()
                         logger.info(f"✅ {model_name} ответил за {elapsed:.1f}с, {len(response_text)} символов")
                         return response_text
                     else:
