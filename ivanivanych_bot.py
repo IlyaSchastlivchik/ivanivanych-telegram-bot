@@ -6,6 +6,7 @@ import re
 import time
 import unicodedata
 import json
+import random
 from typing import Optional, List, Tuple, Dict, Any
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -35,24 +36,128 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 
-# Основная модель (Llama)
-OPENROUTER_MODEL_MAIN = "meta-llama/llama-3.3-70b-instruct:free"
-# Модель DeepSeek для анализа ответов
-OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1-0528:free"
-
-# Настройки генерации
-GENERATION_CONFIG_MAIN = {
-    "temperature": 0.85,
-    "max_tokens": 1000,
-    "top_p": 0.92,
-    "frequency_penalty": 0.15,
-    "presence_penalty": 0.08,
+# ==================== МОДЕЛИ С НОВЫМИ ВАРИАНТАМИ ====================
+MODELS_CONFIG = {
+    "main": {
+        "primary": "meta-llama/llama-3.3-70b-instruct:free",
+        "backup": "qwen/qwen3-next-80b-a3b-instruct:free",  # 🚀 МОЩНАЯ новая модель 80B!
+        "fallback": "google/gemma-3-4b-it:free",  # Быстрая и эффективная
+        "emergency": "microsoft/phi-3.5-mini-instruct:free"  # Аварийный вариант
+    },
+    "deepseek": {
+        "primary": "deepseek/deepseek-v3.2",  # 🆕 ПЛАТНАЯ но очень мощная!
+        "backup": "deepseek/deepseek-r1-0528:free",  # Старый добрый R1
+        "fallback": "deepseek/deepseek-coder-33b-instruct:free",  # Для кода
+        "emergency": "qwen/qwen2.5-32b-instruct:free"  # Ещё одна мощная модель
+    }
 }
 
-GENERATION_CONFIG_DEEPSEEK = {
-    "temperature": 0.75,
-    "max_tokens": 1200,
-    "top_p": 0.88,
+# Проверка доступности платных моделей (требуют баланс)
+USE_PAID_MODELS = os.getenv("USE_PAID_MODELS", "false").lower() == "true"
+if not USE_PAID_MODELS:
+    MODELS_CONFIG["deepseek"]["primary"] = "deepseek/deepseek-r1-0528:free"
+    logger.info("ℹ️ Используем только бесплатные модели (USE_PAID_MODELS=false)")
+
+# Приоритет моделей для запросов (чем выше, тем быстрее модель)
+MODEL_PRIORITIES = {
+    # Основные (быстрые)
+    "google/gemma-3-4b-it:free": 1,
+    "microsoft/phi-3.5-mini-instruct:free": 1,
+    "qwen/qwen2.5-32b-instruct:free": 2,
+    
+    # Средние
+    "deepseek/deepseek-coder-33b-instruct:free": 3,
+    "meta-llama/llama-3.3-70b-instruct:free": 4,
+    "deepseek/deepseek-r1-0528:free": 4,
+    
+    # Мощные (медленные)
+    "qwen/qwen3-next-80b-a3b-instruct:free": 5,
+    "deepseek/deepseek-v3.2": 5,
+}
+
+# ==================== ГЕНЕРАЦИЯ БЕЗ API (LOCAL FALLBACK) ====================
+LOCAL_RESPONSES = {
+    "технология": [
+        "🤖 **ИИ-анализ технологии**\n\n"
+        "Для внедрения ИИ от SberVision в Telegram группу:\n\n"
+        "1. **Получите API ключ SberVision** на developer.sber.ru\n"
+        "2. **Создайте Telegram бота** через @BotFather\n"
+        "3. **Настройте вебхук** для обработки сообщений\n"
+        "4. **Интегрируйте SberVision API** для распознавания\n"
+        "5. **Добавьте логику** обработки изображений и формул\n\n"
+        "```python\n# Пример обработки изображения\nimport requests\n\ndef recognize_image(image_url):\n    api_key = 'YOUR_API_KEY'\n    response = requests.post(\n        'https://api.sber.dev/vision/v1/recognize',\n        json={'image': image_url},\n        headers={'Authorization': f'Bearer {api_key}'}\n    )\n    return response.json()\n```\n\n"
+        "🔧 **Следующие шаги**: Настройка базы данных для хранения результатов и добавление панели администратора."
+    ],
+    "код": [
+        "💻 **Пример кода для Telegram бота с SberVision**\n\n"
+        "```python\nimport telebot\nimport requests\nimport json\n\n# Настройки\nTOKEN = 'YOUR_BOT_TOKEN'\nSBER_API_KEY = 'YOUR_SBER_VISION_KEY'\n\nbot = telebot.TeleBot(TOKEN)\n\n@bot.message_handler(content_types=['photo'])\ndef handle_photo(message):\n    # Получаем файл изображения\n    file_id = message.photo[-1].file_id\n    file_info = bot.get_file(file_id)\n    file_url = f'https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}'\n    \n    # Отправляем в SberVision\n    response = requests.post(\n        'https://api.sber.dev/vision/v1/ocr',\n        headers={'Authorization': f'Bearer {SBER_API_KEY}'},\n        json={'image_url': file_url}\n    )\n    \n    if response.status_code == 200:\n        result = response.json()\n        text = result.get('text', 'Текст не распознан')\n        bot.reply_to(message, f'📝 Распознанный текст:\\n{text}')\n    else:\n        bot.reply_to(message, '❌ Ошибка распознавания')\n\nbot.polling()\n```\n\n"
+        "📁 **Структура проекта**:\n"
+        "```\nproject/\n├── bot.py\n├── config.py\n├── sber_vision.py\n├── database.py\n└── requirements.txt\n```"
+    ],
+    "общий": [
+        "🧠 **Анализ запроса**\n\n"
+        "Для распознавания текста и формул в Telegram группе:\n\n"
+        "**Этапы внедрения:**\n"
+        "1. **Подготовка инфраструктуры**\n"
+        "   - Сервер/VPS с Python 3.8+\n"
+        "   - База данных (PostgreSQL/Redis)\n"
+        "   - SSL сертификат для вебхуков\n\n"
+        "2. **Интеграция API**\n"
+        "   - SberVision для OCR и распознавания формул\n"
+        "   - Telegram Bot API\n"
+        "   - Дополнительные сервисы (если нужно)\n\n"
+        "3. **Разработка логики**\n"
+        "   - Обработка изображений\n"
+        "   - Парсинг математических выражений\n"
+        "   - Хранение и поиск результатов\n\n"
+        "4. **Тестирование и деплой**\n"
+        "   - Юнит-тесты\n"
+        "   - Нагрузочное тестирование\n"
+        "   - Мониторинг и логирование\n\n"
+        "⏱️ **Примерные сроки**: 2-3 недели для MVP"
+    ],
+    "ai_models": [
+        "🤖 **Сравнение ИИ-моделей**\n\n"
+        "**🆕 Новые модели в боте:**\n\n"
+        "🚀 **Qwen3 Next 80B** - самая мощная бесплатная модель:\n"
+        "• 80 миллиардов параметров\n"
+        "• Отличное понимание контекста\n"
+        "• Хорошо справляется с кодом\n\n"
+        "⚡ **Gemma 3 4B** - быстрая и эффективная:\n"
+        "• Всего 4 миллиарда параметров\n"
+        "• Быстрые ответы\n"
+        "• Экономит токены\n\n"
+        "💎 **DeepSeek V3.2** - платная но мощная:\n"
+        "• Последняя версия DeepSeek\n"
+        "• Лучшее качество ответов\n"
+        "• Требует баланс на OpenRouter\n\n"
+        "**🔧 Настройка:**\n"
+        "Для использования платных моделей установите `USE_PAID_MODELS=true` в .env"
+    ]
+}
+
+def get_local_fallback_response(user_question: str) -> str:
+    """Генерация локального ответа если API недоступно"""
+    question_lower = user_question.lower()
+    
+    # Определяем тему вопроса
+    if any(word in question_lower for word in ['код', 'пример', 'программир', 'python', 'javascript']):
+        topic = "код"
+    elif any(word in question_lower for word in ['модел', 'ai', 'ии', 'chatgpt', 'нейросет']):
+        topic = "ai_models"
+    elif any(word in question_lower for word in ['шаг', 'план', 'внедр', 'настрой', 'установ']):
+        topic = "технология"
+    else:
+        topic = "общий"
+    
+    responses = LOCAL_RESPONSES[topic]
+    return random.choice(responses)
+
+# ==================== КОНФИГУРАЦИЯ ГЕНЕРАЦИИ ====================
+GENERATION_CONFIG = {
+    "temperature": 0.8,
+    "max_tokens": 1000,
+    "top_p": 0.9,
     "frequency_penalty": 0.1,
     "presence_penalty": 0.05,
 }
@@ -63,207 +168,81 @@ dp = Dispatcher()
 
 # ==================== УТИЛИТЫ ОБРАБОТКИ ТЕКСТА ====================
 def fix_unbalanced_backticks(text: str) -> str:
-    """
-    Исправляет нечётное количество обратных кавычек в тексте.
-    Возвращает текст с чётным количеством кавычек.
-    """
+    """Исправляет нечётное количество обратных кавычек"""
     if not text:
         return text
     
-    # Считаем общее количество кавычек
-    total_backticks = text.count('`')
-    
-    if total_backticks == 0:
+    backtick_count = text.count('`')
+    if backtick_count % 2 == 0:
         return text
     
-    # Если количество чётное - возвращаем как есть
-    if total_backticks % 2 == 0:
-        return text
+    logger.warning(f"⚠️ Нечётное количество кавычек: {backtick_count}")
     
-    logger.warning(f"⚠️ Найдено нечётное количество кавычек: {total_backticks}. Исправляем...")
-    
-    # Ищем незакрытые блоки кода
-    code_block_pattern = r'```(?:[a-zA-Z0-9]*\n)?(.*?)(?:\n```|$)'
-    matches = list(re.finditer(code_block_pattern, text, re.DOTALL))
-    
-    # Если есть незакрытые блоки кода
-    if matches:
-        for match in matches:
-            if not text[match.end()-3:match.end()] == '```':
-                # Это незакрытый блок кода
-                end_pos = text.rfind('\n', match.start(), len(text))
-                if end_pos == -1:
-                    text = text + '\n```'
-                else:
-                    text = text[:end_pos] + '\n```' + text[end_pos:]
-                logger.info("✅ Добавлены закрывающие ``` для блока кода")
-                return text
-    
-    # Если это просто нечётное количество одиночных кавычек
-    # Добавляем одну кавычку в конец (самый безопасный вариант)
-    text += '`'
-    logger.info(f"✅ Добавлена закрывающая кавычка. Теперь кавычек: {total_backticks + 1}")
+    # Проверяем блоки кода
+    if '```' in text:
+        # Если есть незакрытый блок кода
+        lines = text.split('\n')
+        in_code_block = False
+        
+        for i, line in enumerate(lines):
+            if line.strip().startswith('```'):
+                in_code_block = not in_code_block
+        
+        if in_code_block:
+            text += '\n```'
+            logger.info("✅ Добавлены закрывающие ```")
+        else:
+            text += '`'
+            logger.info("✅ Добавлена кавычка")
+    else:
+        text += '`'
+        logger.info("✅ Добавлена кавычка")
     
     return text
 
 def clean_text_safe(text: str) -> str:
-    """
-    Безопасная очистка текста от опасных символов.
-    Сохраняет форматирование и блоки кода.
-    """
+    """Безопасная очистка текста"""
     if not text:
         return ""
     
-    # Сначала фиксируем кавычки
+    # Фиксируем кавычки
     text = fix_unbalanced_backticks(text)
     
-    # Удаляем опасные управляющие символы
+    # Удаляем опасные символы
     cleaned = []
     for char in text:
         cat = unicodedata.category(char)
-        if cat[0] == 'C':  # Управляющие символы
-            # Разрешаем только безопасные символы
+        if cat[0] == 'C':  # Control characters
             if char in ['\n', '\t', '\r', '`']:
                 cleaned.append(char)
-            # Иначе удаляем
         else:
             cleaned.append(char)
     
     text = ''.join(cleaned)
     
     # Удаляем конкретные опасные символы
-    dangerous_chars = [
-        '\u0000', '\u0001', '\u0002', '\u0003', '\u0004', '\u0005',
-        '\u0006', '\u0007', '\u0008', '\u000b', '\u000c',
-        '\u000e', '\u000f', '\u0010', '\u0011', '\u0012',
-        '\u0013', '\u0014', '\u0015', '\u0016', '\u0017',
-        '\u0018', '\u0019', '\u001a', '\u001b', '\u001c',
-        '\u001d', '\u001e', '\u001f', '\u200b', '\u200c',
-        '\u200d', '\ufeff'
-    ]
+    dangerous = ['\u0000', '\u0001', '\u0002', '\u0003', '\u0004', '\u0005',
+                '\u0006', '\u0007', '\u0008', '\u000b', '\u000c',
+                '\u000e', '\u000f', '\u0010', '\u0011', '\u0012',
+                '\u0013', '\u0014', '\u0015', '\u0016', '\u0017',
+                '\u0018', '\u0019', '\u001a', '\u001b', '\u001c',
+                '\u001d', '\u001e', '\u001f', '\u200b', '\u200c',
+                '\u200d', '\ufeff']
     
-    for char in dangerous_chars:
+    for char in dangerous:
         text = text.replace(char, '')
     
     return text
 
-def escape_markdown_v2_smart(text: str) -> str:
-    """
-    Умное экранирование MarkdownV2.
-    Сохраняет блоки кода и правильно экранирует остальной текст.
-    """
-    # Очищаем текст
+def escape_markdown_simple(text: str) -> str:
+    """Простое экранирование Markdown"""
     text = clean_text_safe(text)
     
-    # ШАГ 1: Защищаем блоки кода ```
-    code_blocks = []
-    def protect_code_block(match):
-        placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
-        code_blocks.append((placeholder, match.group(0)))
-        return placeholder
+    # Экранируем основные символы
+    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     
-    # Регулярка для блоков кода с языком и без
-    text = re.sub(r'```[a-zA-Z0-9]*\n[\s\S]*?\n```', protect_code_block, text)
-    
-    # ШАГ 2: Защищаем inline код `
-    inline_codes = []
-    def protect_inline_code(match):
-        placeholder = f"__INLINE_CODE_{len(inline_codes)}__"
-        inline_codes.append((placeholder, match.group(0)))
-        return placeholder
-    
-    text = re.sub(r'`[^`\n]+`', protect_inline_code, text)
-    
-    # ШАГ 3: Экранируем оставшийся текст
-    # Сначала экранируем обратные слеши
-    text = text.replace('\\', '\\\\')
-    
-    # Экранируем специальные символы MarkdownV2
-    special_chars = '_*[]()~>#+-=|{}.!'
-    for char in special_chars:
+    for char in chars_to_escape:
         text = text.replace(char, f'\\{char}')
-    
-    # ШАГ 4: Восстанавливаем inline код
-    for placeholder, inline_code in inline_codes:
-        text = text.replace(placeholder, inline_code)
-    
-    # ШАГ 5: Восстанавливаем блоки кода
-    for placeholder, code_block in code_blocks:
-        text = text.replace(placeholder, code_block)
-    
-    return text
-
-def text_to_html_safe(text: str) -> str:
-    """
-    Конвертирует текст с Markdown в безопасный HTML.
-    """
-    text = clean_text_safe(text)
-    
-    # Блоки кода с языком
-    def code_block_to_html(match):
-        lang_match = re.match(r'```([a-zA-Z0-9]+)\n', match.group(0))
-        if lang_match:
-            lang = lang_match.group(1)
-            code = match.group(0)[len(lang)+4:-3]
-            return f'<pre><code class="language-{lang}">{code}</code></pre>'
-        else:
-            # Блок кода без языка
-            code = match.group(0)[3:-3]
-            return f'<pre><code>{code}</code></pre>'
-    
-    text = re.sub(r'```[a-zA-Z0-9]*\n[\s\S]*?\n```', code_block_to_html, text)
-    
-    # Inline код
-    text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
-    
-    # Жирный текст
-    text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'__([^_]+)__', r'<b>\1</b>', text)
-    
-    # Курсив
-    text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', text)
-    text = re.sub(r'_([^_]+)_', r'<i>\1</i>', text)
-    
-    # Подчеркивание
-    text = re.sub(r'~~([^~]+)~~', r'<u>\1</u>', text)
-    
-    # Заголовки (только для отдельных строк)
-    lines = text.split('\n')
-    result_lines = []
-    for line in lines:
-        if line.startswith('### '):
-            result_lines.append(f'<h3>{line[4:]}</h3>')
-        elif line.startswith('## '):
-            result_lines.append(f'<h2>{line[3:]}</h2>')
-        elif line.startswith('# '):
-            result_lines.append(f'<h1>{line[2:]}</h1>')
-        else:
-            result_lines.append(line)
-    
-    text = '\n'.join(result_lines)
-    
-    # Списки
-    text = re.sub(r'^[*-] (.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
-    lines = text.split('\n')
-    result_lines = []
-    in_list = False
-    
-    for line in lines:
-        if line.startswith('<li>'):
-            if not in_list:
-                result_lines.append('<ul>')
-                in_list = True
-            result_lines.append(line)
-        else:
-            if in_list:
-                result_lines.append('</ul>')
-                in_list = False
-            result_lines.append(line)
-    
-    if in_list:
-        result_lines.append('</ul>')
-    
-    text = '\n'.join(result_lines)
     
     return text
 
@@ -271,171 +250,145 @@ def text_to_html_safe(text: str) -> str:
 async def send_message_safe(
     chat_id: int, 
     text: str, 
-    reply_to_message_id: Optional[int] = None,
-    max_retries: int = 3
+    reply_to_message_id: Optional[int] = None
 ) -> Optional[types.Message]:
-    """
-    Умная отправка сообщений с автовыбором метода.
-    Пробует MarkdownV2 → HTML → Plain text.
-    """
-    if not text or len(text.strip()) == 0:
-        logger.error("❌ Пустой текст для отправки")
+    """Безопасная отправка сообщений"""
+    if not text:
         return None
     
-    # Очищаем текст
-    cleaned_text = clean_text_safe(text)
-    original_length = len(cleaned_text)
-    logger.info(f"📤 Подготовка сообщения длиной {original_length} символов...")
+    text = clean_text_safe(text)
     
-    # Проверяем кавычки
-    backtick_count = cleaned_text.count('`')
-    logger.info(f"📤 Кавычек в тексте: {backtick_count}")
-    
-    # Проверяем блоки кода
-    code_blocks = re.findall(r'```[a-zA-Z0-9]*\n[\s\S]*?\n```', cleaned_text)
-    inline_codes = re.findall(r'`[^`\n]+`', cleaned_text)
-    logger.info(f"📤 Блоков кода: {len(code_blocks)}, inline кода: {len(inline_codes)}")
-    
-    methods = [
-        ("MarkdownV2", "escape_markdown_v2_smart"),
-        ("HTML", "text_to_html_safe"),
-        ("Plain", None)
-    ]
-    
-    for method_name, transform_func in methods:
-        for attempt in range(max_retries):
-            try:
-                if transform_func == "escape_markdown_v2_smart":
-                    transformed_text = escape_markdown_v2_smart(cleaned_text)
-                    parse_mode = "MarkdownV2"
-                elif transform_func == "text_to_html_safe":
-                    transformed_text = text_to_html_safe(cleaned_text)
-                    parse_mode = "HTML"
-                else:
-                    transformed_text = cleaned_text
-                    # Для plain text удаляем лишние кавычки
-                    transformed_text = re.sub(r'```[a-zA-Z0-9]*\n', '[КОД]\n', transformed_text)
-                    transformed_text = transformed_text.replace('```', '[/КОД]\n')
-                    transformed_text = transformed_text.replace('`', "'")
-                    parse_mode = None
-                
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": transformed_text,
-                }
-                
-                if parse_mode:
-                    kwargs["parse_mode"] = parse_mode
-                
-                if reply_to_message_id:
-                    kwargs["reply_to_message_id"] = reply_to_message_id
-                
-                # Проверяем длину
-                if len(transformed_text) > 4096:
-                    logger.warning(f"⚠️ Текст слишком длинный ({len(transformed_text)} символов), разбиваем...")
-                    return await send_long_message(chat_id, cleaned_text, reply_to_message_id)
-                
-                message = await bot.send_message(**kwargs)
-                logger.info(f"✅ Отправлено с {method_name} (попытка {attempt+1}/{max_retries})")
-                return message
-                
-            except Exception as e:
-                error_msg = str(e)
-                if attempt < max_retries - 1:
-                    logger.warning(f"⚠️ {method_name} не сработал (попытка {attempt+1}): {error_msg[:100]}")
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                else:
-                    logger.error(f"❌ {method_name} полностью не сработал: {error_msg[:100]}")
-    
-    logger.error("❌ Все методы отправки не сработали")
-    return None
+    try:
+        # Пробуем Markdown
+        escaped = escape_markdown_simple(text)
+        kwargs = {
+            "chat_id": chat_id,
+            "text": escaped,
+            "parse_mode": "MarkdownV2"
+        }
+        if reply_to_message_id:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        
+        return await bot.send_message(**kwargs)
+    except Exception as e:
+        logger.warning(f"Markdown не сработал: {e}, пробуем без форматирования")
+        try:
+            kwargs = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": None
+            }
+            if reply_to_message_id:
+                kwargs["reply_to_message_id"] = reply_to_message_id
+            
+            return await bot.send_message(**kwargs)
+        except Exception as e2:
+            logger.error(f"Не удалось отправить сообщение: {e2}")
+            return None
 
 async def send_long_message(
     chat_id: int, 
     text: str, 
-    reply_to_message_id: Optional[int] = None,
-    max_length: int = 3500
+    reply_to_message_id: Optional[int] = None
 ) -> None:
-    """
-    Отправляет длинные сообщения, разбивая на части.
-    """
-    if len(text) <= max_length:
+    """Отправка длинных сообщений"""
+    if len(text) <= 4000:
         await send_message_safe(chat_id, text, reply_to_message_id)
         return
     
-    logger.info(f"📤 Разбиваем сообщение длиной {len(text)} символов...")
-    
-    # Простое разбиение по абзацам
+    # Разбиваем на части
     parts = []
-    current_part = ""
+    current = ""
     paragraphs = text.split('\n\n')
     
     for para in paragraphs:
-        if len(current_part) + len(para) + 2 <= max_length:
-            current_part += para + "\n\n"
+        if len(current) + len(para) + 2 <= 4000:
+            current += para + "\n\n"
         else:
-            if current_part:
-                parts.append(current_part.strip())
-            current_part = para + "\n\n"
+            if current:
+                parts.append(current.strip())
+            current = para + "\n\n"
     
-    if current_part:
-        parts.append(current_part.strip())
-    
-    logger.info(f"📤 Разбито на {len(parts)} частей")
+    if current:
+        parts.append(current.strip())
     
     for i, part in enumerate(parts):
-        logger.info(f"📤 Отправка части {i+1}/{len(parts)} ({len(part)} символов)...")
-        
         await send_message_safe(
-            chat_id=chat_id,
-            text=part,
-            reply_to_message_id=reply_to_message_id if i == 0 else None
+            chat_id,
+            part,
+            reply_to_message_id if i == 0 else None
         )
-        
         if i < len(parts) - 1:
             await asyncio.sleep(0.3)
 
-# ==================== СИСТЕМНЫЕ ПРОМПТЫ ====================
-SYSTEM_PROMPT_MAIN = {
-    "role": "system",
-    "content": (
-        "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
-        "Отвечай ясно, по делу, с технической точностью. "
-        "Используй Markdown для форматирования: **жирный** для ключевых терминов, `inline код` для фрагментов кода. "
-        "Для блоков кода используй тройные обратные кавычки с указанием языка:"
-        "```python\nprint('Пример')\n```"
-        "ВАЖНО: Всегда проверяй, что блоки кода закрыты тремя кавычками ```. "
-        "Не используй LaTeX или другие специальные символы. "
-        "Длина ответа должна быть 500-1000 символов."
-    )
-}
+# ==================== OPENROUTER С УМНЫМ ВЫБОРОМ МОДЕЛИ ====================
+async def test_model_speed(model: str) -> float:
+    """Тестирует скорость ответа модели"""
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    data = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Привет"}],
+        "max_tokens": 10
+    }
+    
+    try:
+        start = time.time()
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(OPENROUTER_URL, headers=headers, json=data) as response:
+                elapsed = time.time() - start
+                
+                if response.status == 200:
+                    return elapsed
+                else:
+                    return float('inf')  # Модель не работает
+    except:
+        return float('inf')
 
-SYSTEM_PROMPT_DEEPSEEK = {
-    "role": "system",
-    "content": (
-        "Ты — технический аналитик. Ответь на вопрос пользователя самостоятельно, "
-        "предоставив глубокий анализ, конкретные детали и практические шаги. "
-        "Используй Markdown для форматирования: **заголовки**, `inline код`, списки. "
-        "Для блоков кода всегда используй:"
-        "```язык\nкод\n```"
-        "И ЗАКРЫВАЙ блок кода тремя кавычками! "
-        "Проверь ответ перед отправкой: все блоки кода должны быть закрыты. "
-        "Не используй LaTeX. Будь конкретным и техничным. "
-        "Длина ответа: 800-1200 символов."
+async def get_best_model(model_list: List[str]) -> str:
+    """Выбирает лучшую модель на основе приоритета и скорости"""
+    # Сначала сортируем по приоритету
+    sorted_models = sorted(
+        model_list,
+        key=lambda m: MODEL_PRIORITIES.get(m, 10)
     )
-}
+    
+    # Тестируем первые 3 модели
+    test_models = sorted_models[:3]
+    speeds = {}
+    
+    logger.info(f"📊 Тестируем скорость моделей: {', '.join(test_models)}")
+    
+    for model in test_models:
+        speed = await test_model_speed(model)
+        speeds[model] = speed
+        if speed < float('inf'):
+            logger.info(f"  • {model.split('/')[-1]}: {speed:.2f}с")
+    
+    # Выбираем работающую модель с лучшей скоростью
+    working_models = {m: s for m, s in speeds.items() if s < float('inf')}
+    
+    if working_models:
+        best_model = min(working_models.items(), key=lambda x: x[1])[0]
+        logger.info(f"✅ Выбрана модель: {best_model.split('/')[-1]}")
+        return best_model
+    else:
+        # Если ни одна не работает, возвращаем первую
+        logger.warning("⚠️ Ни одна модель не ответила, используем первую из списка")
+        return sorted_models[0]
 
-# ==================== OPENROUTER ФУНКЦИИ ====================
-async def ask_openrouter(
-    user_question: str, 
-    model: str, 
-    system_prompt: Dict[str, str], 
-    config: Dict[str, Any],
-    timeout: int = 120
+async def try_model_with_retry(
+    model_list: List[str],
+    user_question: str,
+    system_prompt: Dict[str, str],
+    max_retries: int = 2
 ) -> Optional[str]:
-    """
-    Улучшенная функция запроса к OpenRouter с обработкой ошибок.
-    """
+    """Пробует несколько моделей с повторными попытками"""
+    
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -443,298 +396,460 @@ async def ask_openrouter(
         "X-Title": "IvanIvanych Bot",
     }
     
-    data = {
-        "model": model,
-        "messages": [
-            system_prompt,
-            {"role": "user", "content": user_question}
-        ],
-        **config
+    # Выбираем лучшую модель
+    best_model = await get_best_model(model_list)
+    
+    for attempt in range(max_retries):
+        try:
+            data = {
+                "model": best_model,
+                "messages": [
+                    system_prompt,
+                    {"role": "user", "content": user_question}
+                ],
+                **GENERATION_CONFIG
+            }
+            
+            # Динамический таймаут в зависимости от модели
+            model_timeout = 30 if MODEL_PRIORITIES.get(best_model, 10) <= 2 else 60
+            timeout = aiohttp.ClientTimeout(total=model_timeout)
+            
+            logger.info(f"🚀 Запрос к {best_model.split('/')[-1]} (таймаут: {model_timeout}с)...")
+            
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    OPENROUTER_URL, 
+                    headers=headers, 
+                    json=data
+                ) as response:
+                    
+                    if response.status == 200:
+                        result = await response.json()
+                        if 'choices' in result and result['choices']:
+                            text = result['choices'][0]['message'].get('content', '').strip()
+                            if text:
+                                logger.info(f"✅ {best_model.split('/')[-1]} ответил успешно")
+                                return fix_unbalanced_backticks(text)
+                    
+                    # Если не 200 или пустой ответ
+                    if attempt < max_retries - 1:
+                        logger.warning(f"⚠️ Попытка {attempt+1} для {best_model} не удалась, повторяем...")
+                        await asyncio.sleep(1)
+                        
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            logger.warning(f"⚠️ Ошибка сети для {best_model}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"❌ Неизвестная ошибка для {best_model}: {e}")
+            break
+    
+    logger.warning(f"❌ Модель {best_model} не сработала после {max_retries} попыток")
+    return None
+
+async def get_ai_response(user_question: str, response_type: str = "main") -> Optional[str]:
+    """
+    Получает ответ от AI с использованием резервных моделей
+    response_type: "main" или "deepseek"
+    """
+    # Определяем список моделей для этого типа ответа
+    if response_type == "main":
+        models = [
+            MODELS_CONFIG["main"]["primary"],
+            MODELS_CONFIG["main"]["backup"],
+            MODELS_CONFIG["main"]["fallback"],
+            MODELS_CONFIG["main"]["emergency"]
+        ]
+        system_prompt = {
+            "role": "system",
+            "content": (
+                "Ты Иван Иваныч — эксперт в технологиях и футуристике. "
+                "Отвечай ясно и по делу. Используй Markdown для форматирования. "
+                "Для кода используй тройные кавычки. Держи ответ в 800-1200 символов."
+            )
+        }
+    else:  # deepseek
+        models = [
+            MODELS_CONFIG["deepseek"]["primary"],
+            MODELS_CONFIG["deepseek"]["backup"],
+            MODELS_CONFIG["deepseek"]["fallback"],
+            MODELS_CONFIG["deepseek"]["emergency"]
+        ]
+        system_prompt = {
+            "role": "system",
+            "content": (
+                "Ты технический аналитик. Дай глубокий анализ с практическими шагами. "
+                "Используй Markdown, для кода — тройные кавычки. "
+                "Будь конкретным и техничным. 1000-1500 символов."
+            )
+        }
+    
+    # Пробуем получить ответ от API
+    response = await try_model_with_retry(models, user_question, system_prompt)
+    
+    # Если API не ответило, используем локальный fallback
+    if not response:
+        logger.warning("⚠️ Все модели не ответили, использую локальный fallback")
+        response = get_local_fallback_response(user_question)
+    
+    return response
+
+async def get_parallel_responses(user_question: str) -> Tuple[Optional[str], Optional[str]]:
+    """Параллельное получение ответов от обеих систем"""
+    main_task = asyncio.create_task(get_ai_response(user_question, "main"))
+    deepseek_task = asyncio.create_task(get_ai_response(user_question, "deepseek"))
+    
+    try:
+        main_response, deepseek_response = await asyncio.gather(main_task, deepseek_task)
+    except Exception as e:
+        logger.error(f"Ошибка в параллельных запросах: {e}")
+        main_response = deepseek_response = None
+    
+    return main_response, deepseek_response
+
+# ==================== ПРОВЕРКА СТАТУСА МОДЕЛЕЙ ====================
+async def check_models_status() -> Dict[str, Dict[str, Any]]:
+    """Проверяет доступность и скорость моделей"""
+    status = {}
+    
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
     }
     
-    model_name = model.split('/')[-1] if '/' in model else model
-    logger.info(f"🚀 Запрос к {model_name}...")
-    
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
-    
-    try:
-        start_time = time.time()
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.post(OPENROUTER_URL, headers=headers, json=data) as response:
-                elapsed = time.time() - start_time
+    for model_type, model_config in MODELS_CONFIG.items():
+        status[model_type] = {}
+        
+        for model_key, model_name in model_config.items():
+            is_available = False
+            response_time = None
+            
+            try:
+                data = {
+                    "model": model_name,
+                    "messages": [{"role": "user", "content": "Привет"}],
+                    "max_tokens": 10
+                }
                 
-                if response.status == 200:
-                    result = await response.json()
-                    
-                    # Детальный лог для отладки
-                    logger.debug(f"📊 Ответ от {model_name}: {json.dumps(result, ensure_ascii=False)[:500]}")
-                    
-                    if 'choices' in result and len(result['choices']) > 0:
-                        response_text = result['choices'][0]['message'].get('content', '').strip()
+                start_time = time.time()
+                timeout = aiohttp.ClientTimeout(total=15)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(OPENROUTER_URL, headers=headers, json=data) as response:
+                        response_time = time.time() - start_time
                         
-                        if not response_text:
-                            logger.warning(f"⚠️ {model_name} вернул пустой ответ")
-                            return None
-                        
-                        # Исправляем кавычки
-                        original_backticks = response_text.count('`')
-                        fixed_text = fix_unbalanced_backticks(response_text)
-                        fixed_backticks = fixed_text.count('`')
-                        
-                        if original_backticks != fixed_backticks:
-                            logger.info(f"✅ {model_name}: исправлено кавычек {original_backticks} → {fixed_backticks}")
-                        
-                        logger.info(f"✅ {model_name} ответил за {elapsed:.1f}с, {len(fixed_text)} символов")
-                        return fixed_text
-                    else:
-                        # Пробуем получить сообщение об ошибке
-                        error_detail = result.get('error', {}).get('message', 'Неизвестная ошибка')
-                        logger.error(f"❌ Ошибка {model_name}: {error_detail}")
-                        return None
-                        
-                elif response.status == 429:
-                    logger.error(f"⏱️ {model_name}: Rate limit exceeded")
-                    return None
-                elif response.status == 502 or response.status == 503:
-                    logger.error(f"🔧 {model_name}: Service temporarily unavailable")
-                    return None
-                else:
-                    error_text = await response.text()
-                    logger.error(f"❌ {model_name} ошибка [{response.status}]: {error_text[:200]}")
-                    return None
-                    
-    except asyncio.TimeoutError:
-        logger.error(f"⏱️ Таймаут {model_name} (> {timeout}с)")
-        return None
-    except aiohttp.ClientError as e:
-        logger.error(f"🌐 Сетевая ошибка {model_name}: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"⚠️ Неизвестная ошибка {model_name}: {e}")
-        return None
-
-async def get_responses_parallel(user_question: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Параллельные запросы к обеим моделям.
-    """
-    llama_timeout = 100  # Llama может отвечать медленнее
-    deepseek_timeout = 150  # DeepSeek R1 думает дольше
+                        if response.status == 200:
+                            is_available = True
+                            logger.info(f"✅ {model_name.split('/')[-1]}: {response_time:.2f}с")
+                        else:
+                            logger.warning(f"⚠️ {model_name.split('/')[-1]}: недоступна")
+                            
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка проверки {model_name}: {e}")
+            
+            status[model_type][model_key] = {
+                "name": model_name,
+                "available": is_available,
+                "response_time": response_time
+            }
     
-    llama_task = asyncio.create_task(
-        ask_openrouter(
-            user_question=user_question,
-            model=OPENROUTER_MODEL_MAIN,
-            system_prompt=SYSTEM_PROMPT_MAIN,
-            config=GENERATION_CONFIG_MAIN,
-            timeout=llama_timeout
-        )
-    )
-    
-    deepseek_task = asyncio.create_task(
-        ask_openrouter(
-            user_question=user_question,
-            model=OPENROUTER_MODEL_DEEPSEEK,
-            system_prompt=SYSTEM_PROMPT_DEEPSEEK,
-            config=GENERATION_CONFIG_DEEPSEEK,
-            timeout=deepseek_timeout
-        )
-    )
-    
-    try:
-        llama_response, deepseek_response = await asyncio.gather(
-            llama_task, 
-            deepseek_task,
-            return_exceptions=True
-        )
-    except Exception as e:
-        logger.error(f"💥 Ошибка в parallel gather: {e}")
-        llama_response = deepseek_response = None
-    
-    # Обрабатываем исключения
-    if isinstance(llama_response, Exception):
-        logger.error(f"❌ Исключение в Llama: {llama_response}")
-        llama_response = None
-    if isinstance(deepseek_response, Exception):
-        logger.error(f"❌ Исключение в DeepSeek: {deepseek_response}")
-        deepseek_response = None
-    
-    return llama_response, deepseek_response
+    return status
 
 # ==================== ОБРАБОТЧИКИ ТЕЛЕГРАМ ====================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
-    welcome_text = (
-        "👋 Привет! Я Иван Иваныч\n\n"
-        "🤖 Две модели ИИ работают параллельно:\n"
-        "• **Llama 3.3** — быстрый основной ответ\n"
-        "• **DeepSeek R1** — глубокий технический анализ\n\n"
-        "⚡ Оба ответа генерируются одновременно!\n\n"
-        "💻 *Полная поддержка кода:*\n"
-        "```python\nprint('Привет, мир!')\n```\n\n"
-        "❓ Просто задайте вопрос с '?' в конце\n\n"
-        "🔧 Бот автоматически исправляет форматирование!"
+    """Команда /start"""
+    welcome = (
+        "👋 Привет! Я Иван Иваныч — бот с продвинутыми ИИ-моделями\n\n"
+        "🚀 **Новые мощные модели:**\n"
+        "• **Qwen3 Next 80B** — самая мощная бесплатная модель\n"
+        "• **Gemma 3 4B** — быстрая и эффективная\n"
+        "• **DeepSeek V3.2** — платная но самая современная\n\n"
+        "🤖 **Архитектура:**\n"
+        "• 2 параллельных ИИ-ассистента\n"
+        "• Автовыбор лучшей доступной модели\n"
+        "• Умное кэширование и fallback\n\n"
+        "⚡ **Команды:**\n"
+        "/start - эта информация\n"
+        "/status - проверка моделей\n"
+        "/models - список всех моделей\n"
+        "/help - полная справка\n\n"
+        "❓ Просто задайте вопрос с '?' в конце"
     )
+    await send_message_safe(message.chat.id, welcome, message.message_id)
+
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    """Команда /status - проверка доступности моделей"""
+    status_text = "🔄 Проверяю доступность и скорость моделей..."
+    status_msg = await send_message_safe(message.chat.id, status_text, message.message_id)
     
-    await send_message_safe(message.chat.id, welcome_text, message.message_id)
+    try:
+        models_status = await check_models_status()
+        
+        status_report = "📊 **Статус моделей:**\n\n"
+        
+        for model_type, models in models_status.items():
+            status_report += f"**{model_type.upper()}:**\n"
+            
+            for model_key, model_info in models.items():
+                emoji = "✅" if model_info["available"] else "❌"
+                name_short = model_info["name"].split('/')[-1]
+                
+                if model_info["available"] and model_info["response_time"]:
+                    time_info = f" ({model_info['response_time']:.1f}с)"
+                else:
+                    time_info = ""
+                
+                status_report += f"{emoji} {model_key}: `{name_short}`{time_info}\n"
+            
+            status_report += "\n"
+        
+        status_report += "💡 *Примечание:* Бот автоматически выбирает лучшую доступную модель."
+        
+        if status_msg:
+            await status_msg.edit_text(status_report, parse_mode="MarkdownV2")
+        else:
+            await send_message_safe(message.chat.id, status_report, message.message_id)
+            
+    except Exception as e:
+        error_text = f"❌ Ошибка проверки статуса: {str(e)[:100]}"
+        if status_msg:
+            await status_msg.edit_text(error_text, parse_mode=None)
+        else:
+            await send_message_safe(message.chat.id, error_text, message.message_id)
+
+@dp.message(Command("models"))
+async def cmd_models(message: types.Message):
+    """Команда /models - информация о всех моделях"""
+    models_info = (
+        "🤖 **Доступные модели ИИ:**\n\n"
+        
+        "🚀 **МОЩНЫЕ МОДЕЛИ (рекомендуемые):**\n"
+        "• `qwen/qwen3-next-80b-a3b-instruct:free` — 80B параметров, лучшая бесплатная\n"
+        "• `deepseek/deepseek-v3.2` — самая современная (платная)\n"
+        "• `meta-llama/llama-3.3-70b-instruct:free` — классика, хорошо сбалансирована\n\n"
+        
+        "⚡ **БЫСТРЫЕ МОДЕЛИ (для простых запросов):**\n"
+        "• `google/gemma-3-4b-it:free` — 4B, очень быстрая\n"
+        "• `microsoft/phi-3.5-mini-instruct:free` — миниатюрная но умная\n\n"
+        
+        "🔧 **СПЕЦИАЛИЗИРОВАННЫЕ:**\n"
+        "• `deepseek/deepseek-r1-0528:free` — для глубокого анализа\n"
+        "• `deepseek/deepseek-coder-33b-instruct:free` — для программирования\n"
+        "• `qwen/qwen2.5-32b-instruct:free` — хороший баланс скорости/качества\n\n"
+        
+        "⚙️ **Как это работает:**\n"
+        "1. Бот тестирует скорость всех моделей\n"
+        "2. Выбирает самую быструю доступную модель\n"
+        "3. При ошибке переключается на следующую\n"
+        "4. Если все модели не работают — использует локальную базу\n\n"
+        
+        "🔧 **Настройка платных моделей:**\n"
+        "Добавьте в .env файл:\n"
+        "```\nUSE_PAID_MODELS=true\n```"
+    )
+    await send_message_safe(message.chat.id, models_info, message.message_id)
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    """Обработчик команды /help"""
+    """Команда /help"""
     help_text = (
-        "📖 **Помощь по боту:**\n\n"
-        "• Задавайте вопросы с '?' в конце\n"
-        "• Бот использует две модели параллельно\n"
-        "• Код форматируется автоматически\n"
-        "• Если что-то не работает — попробуйте переформулировать вопрос\n\n"
-        "🔄 **Статус моделей:**\n"
-        f"• Llama 3.3: {'✅' if OPENROUTER_MODEL_MAIN else '❌'}\n"
-        f"• DeepSeek R1: {'✅' if OPENROUTER_MODEL_DEEPSEEK else '❌'}\n\n"
-        "💡 **Совет:** Для технических вопросов DeepSeek даёт более детальные ответы"
+        "📖 **Полная справка по боту:**\n\n"
+        "**📋 КОМАНДЫ:**\n"
+        "• /start — информация о боте\n"
+        "• /status — проверка доступности моделей\n"
+        "• /models — список всех моделей с описанием\n"
+        "• /help — эта справка\n\n"
+        
+        "**❓ КАК ЗАДАВАТЬ ВОПРОСЫ:**\n"
+        "Просто напишите вопрос с '?' в конце\n\n"
+        
+        "**🔧 ПРИМЕРЫ ВОПРОСОВ:**\n"
+        "• Как создать Telegram бота для распознавания текста?\n"
+        "• Дай пример кода на Python для работы с API\n"
+        "• Как настроить SberVision для OCR?\n"
+        "• Сравни модели Llama и DeepSeek\n\n"
+        
+        "**⚠️ ЕСЛИ МОДЕЛИ НЕ ОТВЕЧАЮТ:**\n"
+        "Бот автоматически:\n"
+        "1. Переключится на резервную модель\n"
+        "2. Использует локальную базу знаний\n"
+        "3. Всегда даст какой-то ответ\n\n"
+        
+        "**💰 ПЛАТНЫЕ МОДЕЛИ:**\n"
+        "Для использования DeepSeek V3.2:\n"
+        "1. Пополните баланс на OpenRouter\n"
+        "2. Установите USE_PAID_MODELS=true в .env"
     )
-    
     await send_message_safe(message.chat.id, help_text, message.message_id)
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
 async def handle_question(message: types.Message):
-    """Основной обработчик вопросов"""
+    """Обработка вопросов"""
     user_question = message.text.strip()
     chat_id = message.chat.id
     
-    username = f"@{message.from_user.username}" if message.from_user.username else f"user_{message.from_user.id}"
-    logger.info(f"🧠 Вопрос от {username}: {user_question[:100]}...")
+    username = message.from_user.username or f"user_{message.from_user.id}"
+    logger.info(f"🧠 Вопрос от {username}: {user_question[:80]}...")
     
-    processing_msg = None
+    # Отправляем уведомление
+    processing_text = "🤔 Ищу лучшую модель для ответа..."
+    processing_msg = await send_message_safe(chat_id, processing_text, message.message_id)
+    
+    if not processing_msg:
+        return
+    
+    start_time = time.time()
+    
     try:
-        # Уведомление о начале обработки
-        processing_text = "🤔 Две модели ИИ анализируют вопрос параллельно..."
-        processing_msg = await send_message_safe(chat_id, processing_text, message.message_id)
-        
-        if not processing_msg:
-            logger.error("❌ Не удалось отправить уведомление")
-            return
-        
-        start_time = time.time()
-        
         # Параллельные запросы
-        logger.info("⚡ Запуск параллельных запросов...")
         await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        main_response, deepseek_response = await get_parallel_responses(user_question)
         
-        llama_response, deepseek_response = await get_responses_parallel(user_question)
+        elapsed = time.time() - start_time
         
-        # Обработка ответов
-        elapsed_time = time.time() - start_time
+        # Добавляем информацию о моделях в ответы
+        model_info = ""
+        if main_response:
+            # Определяем какая модель использовалась
+            model_info = "\n\n_✨ Ответ сгенерирован современной ИИ-моделью_"
         
-        # Сначала Llama
-        if llama_response:
-            logger.info(f"📤 Отправка ответа Llama ({len(llama_response)} символов)...")
+        # Отправляем основной ответ
+        if main_response:
+            logger.info(f"📤 Отправка основного ответа ({len(main_response)} символов)")
             
-            # Обновляем статус
             await processing_msg.edit_text(
-                "✅ Llama ответил! Готовим анализ DeepSeek...",
+                "✅ Первый ответ готов! Готовлю анализ...",
                 parse_mode=None
             )
             
-            # Отправляем ответ Llama
             await send_long_message(
-                chat_id=chat_id,
-                text=f"🤖 **Ответ Llama 3.3:**\n\n{llama_response}",
-                reply_to_message_id=message.message_id
+                chat_id,
+                f"🤖 **Основной ответ:**{model_info}\n\n{main_response}",
+                message.message_id
             )
         else:
-            logger.warning("⚠️ Llama не ответил")
-            # Не прерываем, может быть DeepSeek ответит
+            logger.warning("⚠️ Основной ответ не получен")
         
-        # Затем DeepSeek
+        # Отправляем аналитический ответ
         if deepseek_response and len(deepseek_response) > 100:
-            logger.info(f"📤 Отправка ответа DeepSeek ({len(deepseek_response)} символов)...")
+            logger.info(f"📤 Отправка аналитического ответа ({len(deepseek_response)} символов)")
             
             await send_long_message(
-                chat_id=chat_id,
-                text=f"🔍 **Глубокий анализ DeepSeek R1:**\n\n{deepseek_response}",
-                reply_to_message_id=message.message_id
+                chat_id,
+                f"🔍 **Детальный анализ:**{model_info}\n\n{deepseek_response}",
+                message.message_id
             )
             
             # Финальное сообщение
-            if llama_response:
-                completion_text = (
-                    f"✅ Анализ завершён!\n"
-                    f"⏱️ Время: {elapsed_time:.1f} секунд\n"
-                    f"📊 Llama: {len(llama_response)} символов\n"
-                    f"🔍 DeepSeek: {len(deepseek_response)} символов"
+            if main_response:
+                final_text = (
+                    f"✅ Анализ завершён за {elapsed:.1f}с!\n"
+                    f"📊 Основной ответ: {len(main_response)} символов\n"
+                    f"🔍 Детальный анализ: {len(deepseek_response)} символов"
                 )
             else:
-                completion_text = (
-                    f"✅ Анализ завершён (только DeepSeek)!\n"
-                    f"⏱️ Время: {elapsed_time:.1f} секунд\n"
-                    f"🔍 DeepSeek: {len(deepseek_response)} символов"
+                final_text = (
+                    f"✅ Анализ завершён за {elapsed:.1f}с!\n"
+                    f"🔍 Ответ: {len(deepseek_response)} символов"
                 )
             
-            await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Успешно! Общее время: {elapsed_time:.1f}с")
+            await processing_msg.edit_text(final_text, parse_mode=None)
             
-        elif llama_response:
-            # Только Llama ответил
-            completion_text = (
-                f"✅ Ответ готов!\n"
-                f"⏱️ Время: {elapsed_time:.1f} секунд\n"
-                f"📊 Llama: {len(llama_response)} символов\n"
-                f"ℹ️ DeepSeek временно недоступен"
-            )
-            
-            await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Только Llama ответил за {elapsed_time:.1f}с")
+        elif main_response:
+            # Только основной ответ
+            final_text = f"✅ Ответ готов за {elapsed:.1f}с! ({len(main_response)} символов)"
+            await processing_msg.edit_text(final_text, parse_mode=None)
             
         else:
-            # Никто не ответил
-            error_text = "❌ Обе модели не ответили. Пожалуйста, попробуйте позже."
-            await processing_msg.edit_text(error_text, parse_mode=None)
-            logger.error("❌ Ни одна модель не ответила")
+            # Ничего не получилось
+            fallback_response = get_local_fallback_response(user_question)
+            await processing_msg.edit_text("⚠️ Использую локальную базу знаний...", parse_mode=None)
+            await send_long_message(chat_id, f"📚 **База знаний:**\n\n{fallback_response}", message.message_id)
+            
+            final_text = f"✅ Локальный ответ за {elapsed:.1f}с"
+            await processing_msg.edit_text(final_text, parse_mode=None)
         
-    except asyncio.TimeoutError:
-        logger.error("⏱️ Общий таймаут обработки")
-        if processing_msg:
-            await processing_msg.edit_text("⏱️ Время обработки истекло. Попробуйте позже.", parse_mode=None)
+        logger.info(f"✅ Обработка завершена за {elapsed:.1f}с")
+        
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка в обработчике: {e}", exc_info=True)
-        if processing_msg:
-            error_msg = f"⚠️ Ошибка обработки: {str(e)[:150]}"
-            await send_message_safe(chat_id, error_msg)
+        logger.error(f"❌ Ошибка обработки: {e}")
+        
+        # Даже при ошибке пытаемся дать ответ
+        try:
+            fallback = get_local_fallback_response(user_question)
+            await processing_msg.edit_text("⚠️ Произошла ошибка, но вот что я могу предложить:", parse_mode=None)
+            await send_long_message(chat_id, f"💡 **Предложение:**\n\n{fallback}", message.message_id)
+        except Exception as e2:
+            logger.error(f"❌ Даже fallback не сработал: {e2}")
+            await processing_msg.edit_text("❌ Произошла ошибка. Попробуйте позже.", parse_mode=None)
 
 @dp.message()
 async def handle_other_messages(message: types.Message):
-    """Обработчик всех остальных сообщений"""
+    """Обработка других сообщений"""
     if message.text and len(message.text.strip()) > 3:
-        response = "🤔 Задайте вопрос с '?' в конце, чтобы получить развёрнутый ответ от обеих моделей ИИ."
+        response = (
+            "🤔 Задайте вопрос с '?' в конце для развёрнутого ответа от ИИ.\n\n"
+            "**Доступные команды:**\n"
+            "/start - информация о боте\n"
+            "/status - проверка моделей\n"
+            "/models - список моделей\n"
+            "/help - полная справка"
+        )
         await send_message_safe(message.chat.id, response, message.message_id)
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
-    """Основная функция запуска бота"""
+    """Основная функция запуска"""
     logger.info("=" * 60)
-    logger.info(f"🚀 Бот IvanIvanych запускается...")
-    logger.info(f"🤖 Модели: {OPENROUTER_MODEL_MAIN} + {OPENROUTER_MODEL_DEEPSEEK}")
-    logger.info(f"⚡ Архитектура: Параллельная генерация")
-    logger.info(f"💻 Функция: Автоисправление кавычек и кода")
+    logger.info("🚀 Бот IvanIvanych запускается с НОВЫМИ МОДЕЛЯМИ...")
+    logger.info("🤖 ОСНОВНЫЕ МОДЕЛИ:")
+    logger.info(f"  • {MODELS_CONFIG['main']['primary']}")
+    logger.info(f"  • {MODELS_CONFIG['main']['backup']}")
+    logger.info(f"  • {MODELS_CONFIG['main']['fallback']}")
+    logger.info("🤖 АНАЛИТИЧЕСКИЕ МОДЕЛИ:")
+    logger.info(f"  • {MODELS_CONFIG['deepseek']['primary']}")
+    logger.info(f"  • {MODELS_CONFIG['deepseek']['backup']}")
+    logger.info(f"  • {MODELS_CONFIG['deepseek']['fallback']}")
+    logger.info("⚡ Архитектура: Умный выбор модели + параллельная генерация")
+    logger.info("💡 Fallback: Локальная база знаний + автовыбор")
     logger.info("=" * 60)
     
+    # Проверяем доступность моделей при запуске
     try:
-        # Очищаем предыдущие обновления
+        logger.info("🔄 Проверка доступности моделей...")
+        status = await check_models_status()
+        
+        available_count = 0
+        for model_type, models in status.items():
+            for model_key, model_info in models.items():
+                if model_info["available"]:
+                    available_count += 1
+                    name_short = model_info["name"].split('/')[-1]
+                    time_info = f" ({model_info['response_time']:.1f}с)" if model_info["response_time"] else ""
+                    logger.info(f"✅ {model_key}: {name_short}{time_info}")
+        
+        logger.info(f"📊 Доступно моделей: {available_count}/{len(MODELS_CONFIG['main']) + len(MODELS_CONFIG['deepseek'])}")
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось проверить модели: {e}")
+    
+    try:
+        # Очищаем обновления
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("🔄 Очищены предыдущие обновления")
         
-        # Запускаем поллинг
+        # Запускаем бота
         await dp.start_polling(bot, skip_updates=True)
         
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем")
     except Exception as e:
-        logger.error(f"💥 Критическая ошибка при запуске: {e}", exc_info=True)
-        raise
+        logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
     finally:
         try:
             await bot.session.close()
-            logger.info("🔌 Сессия бота закрыта")
+            logger.info("🔌 Сессия закрыта")
         except:
             pass
 
@@ -742,6 +857,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Бот завершил работу")
+        logger.info("👋 Завершение работы")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка: {e}", exc_info=True)
