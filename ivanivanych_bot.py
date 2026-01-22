@@ -63,7 +63,6 @@ dp = Dispatcher()
 def escape_markdown_v2(text: str) -> str:
     """
     НАДЁЖНОЕ экранирование ВСЕХ спецсимволов для MarkdownV2.
-    Экранирует обратные слеши и все спецсимволы Markdown.
     """
     # Сначала экранируем обратные слеши
     text = text.replace('\\', '\\\\')
@@ -75,20 +74,47 @@ def escape_markdown_v2(text: str) -> str:
     
     return text
 
-def clean_ai_response(text: str) -> str:
+def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
     """
-    Очищает ответ от ИИ от LaTeX и сложной разметки.
-    Заменяет \\( и \\) на обычные скобки.
+    Умное разбиение сообщения на части с сохранением структуры.
+    3500 вместо 4096, так как при экранировании текст становится длиннее.
     """
-    # Убираем LaTeX разметку
-    text = text.replace('\\[', '[')
-    text = text.replace('\\]', ']')
-    text = text.replace('\\=', '=')
+    if len(text) <= max_length:
+        return [text]
     
-    # Упрощаем Markdown
-    text = text.replace('**', '')  # Убираем жирный, так как он вызывает проблемы
+    parts = []
     
-    return text
+    # Пытаемся разбить по абзацам
+    paragraphs = text.split('\n\n')
+    current_part = ""
+    
+    for para in paragraphs:
+        # Проверяем, не превысит ли добавление параграфа лимит
+        if len(current_part) + len(para) + 2 <= max_length:
+            current_part += para + "\n\n"
+        else:
+            if current_part:
+                parts.append(current_part.strip())
+            # Если один параграф слишком длинный, разбиваем его по строкам
+            if len(para) > max_length:
+                lines = para.split('\n')
+                current_lines = ""
+                for line in lines:
+                    if len(current_lines) + len(line) + 1 <= max_length:
+                        current_lines += line + "\n"
+                    else:
+                        if current_lines:
+                            parts.append(current_lines.strip())
+                        current_lines = line + "\n"
+                if current_lines:
+                    current_part = current_lines.strip() + "\n\n"
+            else:
+                current_part = para + "\n\n"
+    
+    if current_part:
+        parts.append(current_part.strip())
+    
+    return parts
 
 async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = None, 
                            parse_mode: str = "MarkdownV2") -> Optional[types.Message]:
@@ -147,56 +173,59 @@ async def edit_safe_message(message: types.Message, text: str, parse_mode: str =
 
 async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
     """
-    Отправка длинных сообщений с безопасным экранированием.
+    Отправка длинных сообщений с правильным разбиением на части.
     """
-    # Очищаем текст от LaTeX и сложной разметки
-    cleaned_text = clean_ai_response(text)
+    # Экранируем текст
+    escaped_text = escape_markdown_v2(text)
     
-    # Экранируем для MarkdownV2
-    escaped_text = escape_markdown_v2(cleaned_text)
+    # Умное разбиение на части
+    parts = split_message_smart(escaped_text, max_length=3500)
     
-    # Разбиваем если слишком длинное
-    if len(escaped_text) > 3800:
-        parts = [escaped_text[i:i+3800] for i in range(0, len(escaped_text), 3800)]
-    else:
-        parts = [escaped_text]
+    logger.info(f"📤 Отправка сообщения из {len(parts)} частей...")
     
     for i, part in enumerate(parts):
-        try:
-            kwargs = {
-                "chat_id": chat_id,
-                "text": part,
-                "parse_mode": "MarkdownV2"
-            }
-            
-            if i == 0 and reply_to_message_id:
-                kwargs["reply_to_message_id"] = reply_to_message_id
-            
-            await bot.send_message(**kwargs)
-            
-            if i < len(parts) - 1:
-                await asyncio.sleep(0.3)
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка при отправке части {i+1}: {e}")
-            # Фоллбэк без форматирования
+        max_attempts = 2
+        for attempt in range(max_attempts):
             try:
-                # Убираем экранирование для plain text
-                plain_text = part.replace('\\\\', '\\')
-                plain_text = plain_text.replace('\\', '')
-                
-                plain_kwargs = {
+                kwargs = {
                     "chat_id": chat_id,
-                    "text": f"Часть {i+1}:\n\n{plain_text[:1000]}",
-                    "parse_mode": None
+                    "text": part,
+                    "parse_mode": "MarkdownV2"
                 }
                 
                 if i == 0 and reply_to_message_id:
-                    plain_kwargs["reply_to_message_id"] = reply_to_message_id
+                    kwargs["reply_to_message_id"] = reply_to_message_id
                 
-                await bot.send_message(**plain_kwargs)
-            except Exception as e2:
-                logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
+                await bot.send_message(**kwargs)
+                break  # Успешно отправили
+                
+            except Exception as e:
+                logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка при отправке части {i+1}: {e}")
+                
+                if attempt == max_attempts - 1:  # Последняя попытка
+                    # Фоллбэк без форматирования
+                    try:
+                        # Убираем экранирование для plain text
+                        plain_text = part.replace('\\\\', '\\')
+                        plain_text = re.sub(r'\\([_*\[\]()~`>#+\-=|{}.!])', r'\1', plain_text)
+                        
+                        plain_kwargs = {
+                            "chat_id": chat_id,
+                            "text": f"Часть {i+1}/{len(parts)}:\n\n{plain_text[:3000]}",
+                            "parse_mode": None
+                        }
+                        
+                        if i == 0 and reply_to_message_id:
+                            plain_kwargs["reply_to_message_id"] = reply_to_message_id
+                        
+                        await bot.send_message(**plain_kwargs)
+                    except Exception as e2:
+                        logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
+                
+                await asyncio.sleep(0.5)
+        
+        if i < len(parts) - 1:
+            await asyncio.sleep(0.3)  # Небольшая задержка между частями
 
 # ==================== СИСТЕМНЫЕ ПРОМПТЫ ====================
 SYSTEM_PROMPT_MAIN = {
@@ -205,7 +234,8 @@ SYSTEM_PROMPT_MAIN = {
         "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
         "Отвечай ясно, по делу, с технической точностью. "
         "НЕ используй Markdown разметку, LaTeX (\\( \\)) или специальные символы в ответах. "
-        "Используй только обычный текст."
+        "Используй только обычный текст. "
+        "Длина ответа не должна превышать 1500 символов."
     )
 }
 
@@ -216,6 +246,7 @@ SYSTEM_PROMPT_DEEPSEEK = {
         "предоставив глубокий анализ, конкретные детали и практические шаги. "
         "НЕ используй Markdown разметку, LaTeX (\\( \\)) или специальные символы в ответах. "
         "Используй только обычный текст. "
+        "Длина ответа не должна превышать 1500 символов. "
         "Будь максимально конкретным и техничным."
     )
 }
