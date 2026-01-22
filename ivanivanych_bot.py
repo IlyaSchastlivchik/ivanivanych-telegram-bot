@@ -35,8 +35,8 @@ OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
 # Основная модель (Llama)
 OPENROUTER_MODEL_MAIN = "meta-llama/llama-3.3-70b-instruct:free"
 
-# ✅ ИСПРАВЛЕНИЕ 1: Рабочая модель DeepSeek
-OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1-0528:free"  # Было: "deepseek/deepseek-r1:free"
+# Модель DeepSeek для анализа ответов
+OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1-0528:free"
 
 # Настройки генерации
 GENERATION_CONFIG_MAIN = {
@@ -63,14 +63,45 @@ dp = Dispatcher()
 def escape_markdown_v2(text: str) -> str:
     """
     Экранирует текст для MarkdownV2 в Telegram.
+    Только специальные символы, не трогает уже экранированные.
     """
+    # Список символов для экранирования в MarkdownV2
     escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+    
+    # Находим все НЕэкранированные спецсимволы и экранируем их
+    # Регулярное выражение ищет символы из escape_chars, которым НЕ предшествует \
+    pattern = r'(?<!\\)([' + re.escape(escape_chars) + r'])'
+    
+    # Заменяем найденные символы на экранированные
+    return re.sub(pattern, r'\\\1', text)
+
+def prepare_for_markdown(text: str) -> str:
+    """
+    Подготавливает текст от ИИ для отправки в MarkdownV2.
+    Обрабатывает отдельно заголовки и основной текст.
+    """
+    # Если текст уже содержит экранированные символы от ИИ, не трогаем их
+    # Просто убеждаемся, что все нужные символы экранированы
+    lines = text.split('\n')
+    processed_lines = []
+    
+    for line in lines:
+        # Если строка начинается с ** (жирный текст от ИИ), обрабатываем аккуратно
+        if line.strip().startswith('**') and line.strip().endswith('**'):
+            # Это заголовок от ИИ - экранируем только символы внутри заголовка
+            inner_text = line[2:-2]  # Убираем **
+            escaped_inner = escape_markdown_v2(inner_text)
+            processed_lines.append(f"**{escaped_inner}**")
+        else:
+            # Обычный текст - просто экранируем
+            processed_lines.append(escape_markdown_v2(line))
+    
+    return '\n'.join(processed_lines)
 
 async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
     """Отправляет длинное сообщение с правильным экранированием"""
-    # ✅ ИСПРАВЛЕНИЕ 2: Двойное экранирование для заголовков
-    processed_text = escape_markdown_v2(text)
+    # Подготавливаем текст для MarkdownV2
+    processed_text = prepare_for_markdown(text)
     
     # Разбиваем на части если слишком длинное
     if len(processed_text) > 3800:
@@ -79,61 +110,88 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
         parts = [processed_text]
     
     for i, part in enumerate(parts):
-        try:
-            send_kwargs = {
-                "chat_id": chat_id,
-                "text": part,
-                "parse_mode": "MarkdownV2"
-            }
-            
-            if i == 0 and reply_to_message_id:
-                send_kwargs["reply_to_message_id"] = reply_to_message_id
-            
-            await bot.send_message(**send_kwargs)
-            if i < len(parts) - 1:
-                await asyncio.sleep(0.3)
-        except Exception as e:
-            logger.error(f"❌ Ошибка при отправке части: {e}")
-            # ✅ ИСПРАВЛЕНИЕ 3: Отправка без форматирования при ошибке
+        max_attempts = 2
+        for attempt in range(max_attempts):
             try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Часть {i+1}:\n\n{escape_markdown_v2(part)[:1000]}",
-                    parse_mode=None
-                )
-            except Exception as e2:
-                logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
+                send_kwargs = {
+                    "chat_id": chat_id,
+                    "text": part,
+                    "parse_mode": "MarkdownV2"
+                }
+                
+                if i == 0 and reply_to_message_id:
+                    send_kwargs["reply_to_message_id"] = reply_to_message_id
+                
+                await bot.send_message(**send_kwargs)
+                break  # Успешно отправили, выходим из цикла попыток
+                
+            except Exception as e:
+                logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка при отправке части: {e}")
+                
+                if attempt == max_attempts - 1:  # Последняя попытка
+                    # Фоллбэк: отправляем без форматирования
+                    try:
+                        # Убираем экранирование и Markdown разметку для plain text
+                        plain_text = re.sub(r'\\([_*\[\]()~`>#+\-=|{}.!])', r'\1', part)
+                        plain_text = re.sub(r'\*\*(.*?)\*\*', r'\1', plain_text)  # Убираем **жирный**
+                        plain_text = re.sub(r'__(.*?)__', r'\1', plain_text)  # Убираем __подчеркивание__
+                        plain_text = re.sub(r'`(.*?)`', r'\1', plain_text)  # Убираем `код`
+                        
+                        fallback_kwargs = {
+                            "chat_id": chat_id,
+                            "text": f"Часть {i+1}:\n\n{plain_text[:1000]}",
+                            "parse_mode": None
+                        }
+                        
+                        if i == 0 and reply_to_message_id:
+                            fallback_kwargs["reply_to_message_id"] = reply_to_message_id
+                            
+                        await bot.send_message(**fallback_kwargs)
+                    except Exception as e2:
+                        logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
+                
+                await asyncio.sleep(0.5)  # Небольшая задержка перед повторной попыткой
+        
+        if i < len(parts) - 1:
+            await asyncio.sleep(0.3)
 
 async def send_simple_message(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
     """Универсальная функция для отправки простых сообщений"""
-    try:
-        escaped_text = escape_markdown_v2(text)
-        return await bot.send_message(
-            chat_id=chat_id,
-            text=escaped_text,
-            parse_mode="MarkdownV2",
-            reply_to_message_id=reply_to_message_id
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки сообщения: {e}")
-        # Отправка без форматирования при ошибке
+    max_attempts = 2
+    for attempt in range(max_attempts):
         try:
+            escaped_text = escape_markdown_v2(text)
             return await bot.send_message(
                 chat_id=chat_id,
-                text=text,
-                parse_mode=None,
+                text=escaped_text,
+                parse_mode="MarkdownV2",
                 reply_to_message_id=reply_to_message_id
             )
-        except Exception as e2:
-            logger.error(f"❌ Не удалось отправить сообщение вообще: {e2}")
-            return None
+        except Exception as e:
+            logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка отправки сообщения: {e}")
+            
+            if attempt == max_attempts - 1:  # Последняя попытка
+                # Фоллбэк без форматирования
+                try:
+                    return await bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=None,
+                        reply_to_message_id=reply_to_message_id
+                    )
+                except Exception as e2:
+                    logger.error(f"❌ Не удалось отправить сообщение вообще: {e2}")
+                    return None
+            
+            await asyncio.sleep(0.5)
 
 # ==================== СИСТЕМНЫЕ ПРОМПТЫ ====================
 SYSTEM_PROMPT_MAIN = {
     "role": "system",
     "content": (
         "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
-        "Отвечай ясно, по делу, с технической точностью."
+        "Отвечай ясно, по делу, с технической точностью. "
+        "Используй Markdown для форматирования: **жирный** для ключевых терминов."
     )
 }
 
@@ -142,6 +200,7 @@ SYSTEM_PROMPT_DEEPSEEK = {
     "content": (
         "Ты — технический аналитик. Ответь на вопрос пользователя самостоятельно, "
         "предоставив глубокий анализ, конкретные детали и практические шаги. "
+        "Используй Markdown для форматирования: **жирный**, `код`, ### заголовки. "
         "Будь максимально конкретным и техничным."
     )
 }
@@ -241,14 +300,25 @@ async def get_responses_parallel(user_question: str) -> Tuple[Optional[str], Opt
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     welcome_text = (
-        "👋 Привет\\! Я Иван Иваныч\n\n"
+        "👋 Привет! Я Иван Иваныч\n\n"
         "🤖 Две модели ИИ работают параллельно:\n"
-        "• Llama 3\\.3 — быстрый основной ответ\n"
+        "• Llama 3.3 — быстрый основной ответ\n"
         "• DeepSeek R1 — глубокий технический анализ\n\n"
-        "⚡ Оба ответа генерируются одновременно\\!\n\n"
+        "⚡ Оба ответа генерируются одновременно!\n\n"
         "❓ Просто задайте вопрос с '?' в конце"
     )
     await send_simple_message(message.chat.id, welcome_text, message.message_id)
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    help_text = (
+        "📖 Помощь\n\n"
+        "Бот использует **две модели параллельно**:\n"
+        "1️⃣ Llama отвечает первым (5-10с)\n"
+        "2️⃣ DeepSeek добавляет анализ (10-15с)\n\n"
+        "💡 Совет: Сложные технические вопросы получают лучший анализ!"
+    )
+    await send_simple_message(message.chat.id, help_text, message.message_id)
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
 async def handle_question(message: types.Message):
@@ -262,7 +332,7 @@ async def handle_question(message: types.Message):
     processing_msg = None
     try:
         # ШАГ 1: Уведомление о начале обработки
-        processing_text = "🤔 Две модели ИИ анализируют вопрос параллельно\\.\\.\\."
+        processing_text = "🤔 Две модели ИИ анализируют вопрос параллельно..."
         processing_msg = await send_simple_message(chat_id, processing_text, message.message_id)
         
         start_total_time = time.time()
@@ -280,22 +350,20 @@ async def handle_question(message: types.Message):
             
             if processing_msg:
                 await processing_msg.edit_text(
-                    "✅ Llama ответил\\! Готовим анализ DeepSeek\\.\\.\\.",
+                    "✅ Llama ответил! Готовим анализ DeepSeek...",
                     parse_mode="MarkdownV2"
                 )
             
-            # Экранируем заголовок отдельно
-            header = "**🤖 Ответ Llama 3\\.3:**"
             await send_long_message(
                 chat_id=chat_id,
-                text=f"{header}\n\n{llama_response}",
+                text=f"**🤖 Ответ Llama 3.3:**\n\n{llama_response}",
                 reply_to_message_id=message.message_id
             )
         else:
             logger.error("❌ Llama не ответил")
             if processing_msg:
                 await processing_msg.edit_text(
-                    "❌ Основная модель не ответила\\. Попробуйте позже\\.",
+                    "❌ Основная модель не ответила. Попробуйте позже.",
                     parse_mode="MarkdownV2"
                 )
             return
@@ -303,16 +371,15 @@ async def handle_question(message: types.Message):
         # ШАГ 4: ПОТОМ ОТПРАВЛЯЕМ ОТВЕТ DEEPSEEK (ЕСЛИ ЕСТЬ)
         if deepseek_response and len(deepseek_response) > 50:
             logger.info("📤 Отправка ответа DeepSeek...")
-            header = "**🔍 Глубокий анализ DeepSeek R1:**"
             await send_long_message(
                 chat_id=chat_id,
-                text=f"{header}\n\n{deepseek_response}",
+                text=f"**🔍 Глубокий анализ DeepSeek R1:**\n\n{deepseek_response}",
                 reply_to_message_id=message.message_id
             )
             
             total_time = time.time() - start_total_time
             completion_text = (
-                f"✅ Анализ завершён\\!\n"
+                f"✅ Анализ завершён!\n"
                 f"⏱️ Общее время: {total_time:.1f} секунд\n"
                 f"📊 Llama: {len(llama_response)} символов\n"
                 f"🔍 DeepSeek: {len(deepseek_response)} символов"
@@ -329,7 +396,7 @@ async def handle_question(message: types.Message):
             logger.warning("⚠️ DeepSeek не вернул ответ")
             total_time = time.time() - start_total_time
             fallback_text = (
-                f"✅ Основной ответ готов\\!\n"
+                f"✅ Основной ответ готов!\n"
                 f"⏱️ Время: {total_time:.1f} секунд\n"
                 f"ℹ️ DeepSeek временно недоступен"
             )
@@ -339,14 +406,14 @@ async def handle_question(message: types.Message):
         
     except asyncio.TimeoutError:
         logger.error("⏱️ Общий таймаут обработки")
-        timeout_text = "⏱️ Время обработки истекло\\. Попробуйте позже\\."
+        timeout_text = "⏱️ Время обработки истекло. Попробуйте позже."
         if processing_msg:
             await processing_msg.edit_text(timeout_text, parse_mode="MarkdownV2")
         else:
             await send_simple_message(chat_id, timeout_text, message.message_id)
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
-        error_text = escape_markdown_v2(f"⚠️ Ошибка обработки: {str(e)[:200]}")
+        error_text = f"⚠️ Ошибка обработки: {str(e)[:200]}"
         if processing_msg:
             await processing_msg.edit_text(error_text, parse_mode="MarkdownV2")
         else:
