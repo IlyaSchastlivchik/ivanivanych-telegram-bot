@@ -33,35 +33,35 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     exit(1)
 
 # Конфигурация OpenRouter API
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_API_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 
-# ==================== МОДЕЛИ С УВЕЛИЧЕННЫМИ ТАЙМАУТАМИ ====================
+# ==================== МОДЕЛИ ====================
 MODELS_CONFIG = {
     "main": {
         "primary": "meta-llama/llama-3.3-70b-instruct:free",
-        "backup": "qwen/qwen-2.5-vl-7b-instruct:free",  # Замена для Gemma
+        "backup": "qwen/qwen-2.5-vl-7b-instruct:free",
         "fallback": "qwen/qwen2.5-32b-instruct:free",
         "emergency": "microsoft/phi-3.5-mini-instruct:free"
     },
     "deepseek": {
         "primary": "deepseek/deepseek-r1-0528:free",
-        "backup": "qwen/qwen3-coder:free",  # Замена для Gemma
+        "backup": "qwen/qwen3-coder:free",
         "fallback": "deepseek/deepseek-coder-33b-instruct:free",
         "emergency": "qwen/qwen2.5-32b-instruct:free"
     }
 }
 
-logger.info("🔧 Режим: ТОЛЬКО БЕСПЛАТНЫЕ МОДЕЛИ с увеличенными таймаутами")
+logger.info("🔧 Режим: ТОЛЬКО БЕСПЛАТНЫЕ МОДЕЛИ")
 
-# Таймауты для разных типов моделей (в секундах)
+# Таймауты (в секундах)
 MODEL_TIMEOUTS = {
-    "fast": 45,      # Быстрые модели: phi-3.5, qwen-2.5-7b
-    "medium": 90,    # Средние: qwen2.5-32b, deepseek-coder
-    "slow": 150      # Медленные: llama-70b, deepseek-r1, qwen3-coder
+    "fast": 45,
+    "medium": 90,
+    "slow": 150
 }
 
-# ==================== КОНФИГУРАЦИЯ ГЕНЕРАЦИИ ====================
+# ==================== КОНФИГУРАЦИЯ ====================
 GENERATION_CONFIG = {
     "temperature": 0.8,
     "max_tokens": 1000,
@@ -70,10 +70,9 @@ GENERATION_CONFIG = {
     "presence_penalty": 0.05,
 }
 
-# Специальные настройки для DeepSeek R1
 DEEPSEEK_R1_CONFIG = {
     "temperature": 0.7,
-    "max_tokens": 800,  # Уменьшено для избежания обрезания
+    "max_tokens": 800,
     "top_p": 0.85,
     "frequency_penalty": 0.15,
     "presence_penalty": 0.1,
@@ -83,243 +82,172 @@ DEEPSEEK_R1_CONFIG = {
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# ==================== УТИЛИТЫ ОБРАБОТКИ ТЕКСТА ====================
+# ==================== УТИЛИТЫ ====================
 def clean_text_safe(text: str) -> str:
-    """Безопасная очистка текста - только удаляем опасные символы"""
+    """Очистка текста от опасных символов"""
     if not text:
         return ""
     
-    # Находим и защищаем блоки кода с ```
-    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
-    
-    def protect_code_block(match):
-        code_content = match.group(0)
-        inner_content = match.group(1)
-        cleaned_inner = ''.join(char for char in inner_content 
-                               if unicodedata.category(char)[0] != 'C' 
-                               or char == '\n' or char == '\t' or char == '\r')
-        cleaned_inner = cleaned_inner.replace('\u0000', '').replace('\u0001', '').replace('\u0002', '')
-        cleaned_inner = cleaned_inner.replace('\u0003', '').replace('\u0004', '').replace('\u0005', '')
-        
-        language = match.group(0)[3:].split('\n')[0].strip()
-        if language and language != '```':
-            return f"```{language}\n{cleaned_inner}\n```"
-        else:
-            return f"```\n{cleaned_inner}\n```"
-    
-    text = re.sub(code_block_pattern, protect_code_block, text)
-    
-    # Обрабатываем оставшийся текст
-    text = ''.join(char for char in text if unicodedata.category(char)[0] != 'C' 
-                  or char == '\n' or char == '\t' or char == '\r' or char == '`')
-    
-    dangerous_chars = ['\u0000', '\u0001', '\u0002', '\u0003', '\u0004', '\u0005',
-                      '\u0006', '\u0007', '\u0008', '\u000b', '\u000c',
-                      '\u000e', '\u000f', '\u0010', '\u0011', '\u0012',
-                      '\u0013', '\u0014', '\u0015', '\u0016', '\u0017',
-                      '\u0018', '\u0019', '\u001a', '\u001b', '\u001c',
-                      '\u001d', '\u001e', '\u001f', '\u200b', '\u200c',
-                      '\u200d', '\ufeff']
+    dangerous_chars = [
+        '\u0000', '\u0001', '\u0002', '\u0003', '\u0004', '\u0005',
+        '\u0006', '\u0007', '\u0008', '\u000b', '\u000c',
+        '\u000e', '\u000f', '\u0010', '\u0011', '\u0012',
+        '\u0013', '\u0014', '\u0015', '\u0016', '\u0017',
+        '\u0018', '\u0019', '\u001a', '\u001b', '\u001c',
+        '\u001d', '\u001e', '\u001f', '\u200b', '\u200c',
+        '\u200d', '\ufeff'
+    ]
     
     for char in dangerous_chars:
         text = text.replace(char, '')
     
     return text
 
-def escape_markdown_v2_final(text: str) -> str:
-    """ФИНАЛЬНАЯ версия экранирования MarkdownV2"""
+def escape_markdown_v2(text: str) -> str:
+    """Правильное экранирование MarkdownV2"""
     text = clean_text_safe(text)
     
-    # Защищаем блоки кода
-    code_blocks = []
-    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
-    
-    def replace_code_block(match):
-        placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
-        code_blocks.append((placeholder, match.group(0)))
-        return placeholder
-    
-    text = re.sub(code_block_pattern, replace_code_block, text)
-    
-    # Защищаем inline код
-    inline_code_blocks = []
-    inline_pattern = r'`([^`\n]+)`'
-    
-    def replace_inline_code(match):
-        placeholder = f"__INLINE_CODE_{len(inline_code_blocks)}__"
-        inline_code_blocks.append((placeholder, match.group(0)))
-        return placeholder
-    
-    text = re.sub(inline_pattern, replace_inline_code, text)
-    
-    # Экранируем оставшийся текст
-    text = text.replace('\\', '\\\\')
-    
-    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    # Сначала экранируем все спецсимволы
+    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     
     for char in chars_to_escape:
         text = text.replace(char, '\\' + char)
     
-    # Восстанавливаем inline код
-    for placeholder, inline_code in inline_code_blocks:
-        text = text.replace(placeholder, inline_code)
+    return text
+
+def format_code_blocks(text: str) -> str:
+    """Форматирование блоков кода для MarkdownV2"""
+    # Защищаем блоки кода с тройными кавычками
+    def protect_triple_backtick(match):
+        content = match.group(1)
+        # Экранируем только начало и конец блока
+        return f'```{content}```'
     
-    # Восстанавливаем блоки кода
-    for placeholder, code_block in code_blocks:
-        text = text.replace(placeholder, code_block)
+    # Ищем блоки кода с языком или без
+    text = re.sub(r'```([\w]*)\n([\s\S]*?)\n```', 
+                 lambda m: f'```{m.group(1)}\n{m.group(2)}\n```', text)
     
     return text
 
-def split_message_smart_final(text: str, max_length: int = 3500) -> List[str]:
-    """ФИНАЛЬНАЯ версия разбиения сообщений"""
-    if len(text) <= max_length:
-        return [text]
-    
-    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
-    code_matches = list(re.finditer(code_block_pattern, text))
-    
-    if not code_matches:
-        parts = []
-        current = ""
-        paragraphs = text.split('\n\n')
-        
-        for para in paragraphs:
-            if len(current) + len(para) + 2 <= max_length:
-                current += para + "\n\n"
-            else:
-                if current:
-                    parts.append(current.strip())
-                current = para + "\n\n"
-        
-        if current:
-            parts.append(current.strip())
-        
-        return parts
-    
-    parts = []
-    current_pos = 0
-    
-    for match in code_matches:
-        code_start = match.start()
-        code_end = match.end()
-        code_block = match.group(0)
-        
-        text_before = text[current_pos:code_start]
-        if text_before:
-            text_parts = split_message_smart_final(text_before, max_length)
-            if text_parts:
-                if parts:
-                    parts[-1] += text_parts[0]
-                    parts.extend(text_parts[1:])
-                else:
-                    parts.extend(text_parts)
-        
-        if parts and len(parts[-1]) + len(code_block) <= max_length:
-            parts[-1] += code_block
-        else:
-            parts.append(code_block)
-        
-        current_pos = code_end
-    
-    text_after = text[current_pos:]
-    if text_after:
-        text_parts = split_message_smart_final(text_after, max_length)
-        if text_parts:
-            if parts and len(parts[-1]) + len(text_parts[0]) <= max_length:
-                parts[-1] += text_parts[0]
-                parts.extend(text_parts[1:])
-            else:
-                parts.extend(text_parts)
-    
-    return parts
-
-async def send_safe_message_final(chat_id: int, text: str, reply_to_message_id: int = None, 
-                                 parse_mode: str = "MarkdownV2") -> Optional[types.Message]:
-    """ФИНАЛЬНАЯ версия отправки сообщений"""
+async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
+    """Упрощенная отправка сообщений"""
     try:
-        escaped_text = escape_markdown_v2_final(text)
-        
-        backtick_count = escaped_text.count('`')
-        if backtick_count % 2 != 0:
-            logger.warning(f"⚠️ Нечётное количество кавычек: {backtick_count}")
-            escaped_text += '`'
+        # Сначала пробуем HTML
+        html_text = text
+        html_text = re.sub(r'```([\w]*)\n([\s\S]*?)\n```', 
+                         r'<pre><code>\2</code></pre>', html_text)
+        html_text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', html_text)
         
         kwargs = {
             "chat_id": chat_id,
-            "text": escaped_text,
-            "parse_mode": parse_mode
+            "text": html_text,
+            "parse_mode": "HTML"
         }
         if reply_to_message_id:
             kwargs["reply_to_message_id"] = reply_to_message_id
         
         result = await bot.send_message(**kwargs)
-        logger.info(f"✅ Сообщение отправлено с MarkdownV2, длина: {len(escaped_text)} символов")
+        logger.info(f"✅ Сообщение отправлено с HTML, длина: {len(text)} символов")
         return result
         
     except Exception as e:
-        error_msg = str(e)
-        logger.warning(f"⚠️ MarkdownV2 не сработал: {error_msg}")
+        logger.warning(f"⚠️ HTML не сработал: {e}")
         
-        if "PreCode" in error_msg or "can't parse" in error_msg:
-            logger.warning("⚠️ Проблема с блоками кода, пробуем альтернативный метод...")
+        try:
+            # Пробуем MarkdownV2
+            escaped_text = escape_markdown_v2(text)
+            formatted_text = format_code_blocks(escaped_text)
+            
+            kwargs = {
+                "chat_id": chat_id,
+                "text": formatted_text,
+                "parse_mode": "MarkdownV2"
+            }
+            if reply_to_message_id:
+                kwargs["reply_to_message_id"] = reply_to_message_id
+            
+            result = await bot.send_message(**kwargs)
+            logger.info(f"✅ Сообщение отправлено с MarkdownV2, длина: {len(text)} символов")
+            return result
+            
+        except Exception as e2:
+            logger.warning(f"⚠️ MarkdownV2 не сработал: {e2}")
+            
             try:
-                html_text = text
-                html_text = re.sub(r'```(?:[\w]*)\n([\s\S]*?)\n```', 
-                                 r'<pre><code>\1</code></pre>', html_text)
-                html_text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', html_text)
-                
+                # Без форматирования
+                cleaned_text = clean_text_safe(text)
                 kwargs = {
                     "chat_id": chat_id,
-                    "text": html_text,
-                    "parse_mode": "HTML"
+                    "text": cleaned_text,
+                    "parse_mode": None
                 }
                 if reply_to_message_id:
                     kwargs["reply_to_message_id"] = reply_to_message_id
                 
                 result = await bot.send_message(**kwargs)
-                logger.info("✅ Сообщение отправлено с HTML форматированием")
+                logger.info("✅ Сообщение отправлено без форматирования")
                 return result
-            except Exception as html_e:
-                logger.warning(f"⚠️ HTML тоже не сработал: {html_e}")
-    
-    try:
-        cleaned_text = clean_text_safe(text)
-        kwargs = {
-            "chat_id": chat_id,
-            "text": cleaned_text,
-            "parse_mode": None
-        }
-        if reply_to_message_id:
-            kwargs["reply_to_message_id"] = reply_to_message_id
-        
-        result = await bot.send_message(**kwargs)
-        logger.info("✅ Сообщение отправлено без форматирования")
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ Не удалось отправить сообщение вообще: {e}")
-        return None
+                
+            except Exception as e3:
+                logger.error(f"❌ Не удалось отправить сообщение: {e3}")
+                return None
 
-async def send_long_message_final(chat_id: int, text: str, reply_to_message_id: int = None):
-    """ФИНАЛЬНАЯ версия отправки длинных сообщений"""
+def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
+    """Умное разбиение сообщений"""
+    if len(text) <= max_length:
+        return [text]
+    
+    # Пробуем разбить по двойным переносам строк
+    parts = []
+    paragraphs = text.split('\n\n')
+    
+    current_part = ""
+    for para in paragraphs:
+        if len(current_part) + len(para) + 2 <= max_length:
+            current_part += para + "\n\n"
+        else:
+            if current_part:
+                parts.append(current_part.strip())
+            current_part = para + "\n\n"
+    
+    if current_part:
+        parts.append(current_part.strip())
+    
+    # Если все равно слишком длинные, разбиваем по строкам
+    if any(len(p) > max_length for p in parts):
+        new_parts = []
+        for part in parts:
+            if len(part) <= max_length:
+                new_parts.append(part)
+            else:
+                lines = part.split('\n')
+                current = ""
+                for line in lines:
+                    if len(current) + len(line) + 1 <= max_length:
+                        current += line + "\n"
+                    else:
+                        if current:
+                            new_parts.append(current.strip())
+                        current = line + "\n"
+                if current:
+                    new_parts.append(current.strip())
+        parts = new_parts
+    
+    return parts
+
+async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
+    """Отправка длинных сообщений"""
     original_length = len(text)
     logger.info(f"📤 Подготовка сообщения длиной {original_length} символов...")
     
-    code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', text)
-    inline_codes = re.findall(r'`[^`\n]+`', text)
-    
-    parts = split_message_smart_final(text, max_length=3500)
+    parts = split_message_smart(text, max_length=3500)
     logger.info(f"📤 Разбито на {len(parts)} частей")
     
     for i, part in enumerate(parts):
         part_length = len(part)
         logger.info(f"📤 Часть {i+1}/{len(parts)}: {part_length} символов")
         
-        part_code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', part)
-        if part_code_blocks:
-            logger.info(f"📤 Часть {i+1} содержит {len(part_code_blocks)} блок(ов) кода")
-        
-        message = await send_safe_message_final(
+        message = await send_safe_message(
             chat_id=chat_id,
             text=part,
             reply_to_message_id=reply_to_message_id if i == 0 else None
@@ -333,9 +261,9 @@ async def send_long_message_final(chat_id: int, text: str, reply_to_message_id: 
         if i < len(parts) - 1:
             await asyncio.sleep(0.3)
 
-# ==================== OPENROUTER ФУНКЦИИ С УВЕЛИЧЕННЫМИ ТАЙМАУТАМИ ====================
+# ==================== OPENROUTER ФУНКЦИИ ====================
 async def test_model_speed(model: str) -> float:
-    """Тестирует скорость ответа модели с увеличенным таймаутом"""
+    """Тестирование скорости модели"""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -362,22 +290,16 @@ async def test_model_speed(model: str) -> float:
         return float('inf')
 
 def get_model_timeout(model: str) -> int:
-    """Определяет таймаут для модели на основе её типа"""
+    """Определение таймаута для модели"""
     model_lower = model.lower()
     
-    # Быстрые модели
     if "phi-3.5" in model_lower or "qwen-2.5-7b" in model_lower:
         return MODEL_TIMEOUTS["fast"]
-    
-    # Средние модели
     elif "qwen2.5-32b" in model_lower or "coder" in model_lower:
         return MODEL_TIMEOUTS["medium"]
-    
-    # Медленные/глубокие модели
     elif "llama" in model_lower or "deepseek-r1" in model_lower or "qwen3-coder" in model_lower:
         return MODEL_TIMEOUTS["slow"]
     
-    # По умолчанию - средний таймаут
     return MODEL_TIMEOUTS["medium"]
 
 async def try_model_with_retry(
@@ -386,7 +308,7 @@ async def try_model_with_retry(
     system_prompt: Dict[str, str],
     max_retries: int = 2
 ) -> Tuple[Optional[str], Optional[str], int]:
-    """Пробует несколько моделей с увеличенными таймаутами"""
+    """Попытка использовать модель с повторными попытками"""
     
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -395,34 +317,32 @@ async def try_model_with_retry(
         "X-Title": "IvanIvanych Bot",
     }
     
-    # Тестируем все модели
+    # Тестируем модели
     speeds = {}
-    
     for model in model_list:
         speed = await test_model_speed(model)
         speeds[model] = speed
         if speed < float('inf'):
             logger.info(f"  • {model.split('/')[-1]}: {speed:.2f}с")
     
-    # Сортируем модели по скорости (быстрые первыми)
+    # Сортируем по скорости
     sorted_models = sorted(
         [m for m, s in speeds.items() if s < float('inf')],
         key=lambda x: speeds[x]
     )
     
-    # Если ни одна модель не ответила, используем первую из списка
     if not sorted_models:
-        logger.warning("⚠️ Ни одна модель не ответила при тестировании")
+        logger.warning("⚠️ Ни одна модель не ответила")
         sorted_models = model_list
     
-    # Пробуем каждую модель по порядку
+    # Пробуем каждую модель
     for best_model in sorted_models:
         model_timeout = get_model_timeout(best_model)
         logger.info(f"🎯 Выбрана модель: {best_model.split('/')[-1]} (таймаут: {model_timeout}с)")
         
         for attempt in range(max_retries):
             try:
-                # Используем специальные настройки для DeepSeek R1
+                # Специальные настройки для DeepSeek R1
                 if "deepseek-r1" in best_model.lower():
                     config = DEEPSEEK_R1_CONFIG
                 else:
@@ -456,12 +376,10 @@ async def try_model_with_retry(
                             if 'choices' in result and result['choices']:
                                 text = result['choices'][0]['message'].get('content', '').strip()
                                 
-                                # Улучшенная проверка ответа
-                                if text and len(text) > 20 and not text.isspace():  # Минимальная длина и не только пробелы
-                                    # Проверяем блоки кода
+                                if text and len(text) > 20 and not text.isspace():
+                                    # Проверяем и корректируем блоки кода
                                     backtick_count = text.count('`')
                                     if backtick_count % 2 != 0:
-                                        logger.warning(f"⚠️ Нечётное количество кавычек: {backtick_count}")
                                         text += '`'
                                     
                                     code_blocks = len(re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', text))
@@ -474,7 +392,7 @@ async def try_model_with_retry(
                             logger.warning(f"⚠️ {best_model.split('/')[-1]} ошибка [{response.status}]: {error_text[:200]}")
                     
                     if attempt < max_retries - 1:
-                        wait_time = 1.5 * (attempt + 1)  # Увеличиваем время ожидания с каждой попыткой
+                        wait_time = 1.5 * (attempt + 1)
                         logger.info(f"🔄 Повторная попытка через {wait_time} секунд...")
                         await asyncio.sleep(wait_time)
                         
@@ -482,12 +400,8 @@ async def try_model_with_retry(
                 logger.warning(f"⏱️ Таймаут {best_model.split('/')[-1]} (> {model_timeout}с)")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(1.5)
-            except aiohttp.ClientError as e:
-                logger.warning(f"🌐 Сетевая ошибка {best_model.split('/')[-1]}: {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1.5)
             except Exception as e:
-                logger.error(f"❌ Неизвестная ошибка {best_model.split('/')[-1]}: {e}")
+                logger.error(f"❌ Ошибка {best_model.split('/')[-1]}: {e}")
                 break
         
         logger.warning(f"❌ Модель {best_model} не сработала после {max_retries} попыток")
@@ -509,37 +423,33 @@ LOCAL_RESPONSES = {
         "🔧 **Следующие шаги**: Настройка базы данных для хранения результатов и добавление панели администратора."
     ],
     "код": [
-        "💻 **Пример кода для Telegram бота с SberVision**\n\n"
-        "```python\nimport telebot\nimport requests\nimport json\n\n# Настройки\nTOKEN = 'YOUR_BOT_TOKEN'\nSBER_API_KEY = 'YOUR_SBER_VISION_KEY'\n\nbot = telebot.TeleBot(TOKEN)\n\n@bot.message_handler(content_types=['photo'])\ndef handle_photo(message):\n    # Получаем файл изображения\n    file_id = message.photo[-1].file_id\n    file_info = bot.get_file(file_id)\n    file_url = f'https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}'\n    \n    # Отправляем в SberVision\n    response = requests.post(\n        'https://api.sber.dev/vision/v1/ocr',\n        headers={'Authorization': f'Bearer {SBER_API_KEY}'},\n        json={'image_url': file_url}\n    )\n    \n    if response.status_code == 200:\n        result = response.json()\n        text = result.get('text', 'Текст не распознан')\n        bot.reply_to(message, f'📝 Распознанный текст:\\n{text}')\n    else:\n        bot.reply_to(message, '❌ Ошибка распознавания')\n\nbot.polling()\n```\n\n"
-        "📁 **Структура проекта**:\n"
-        "```\nproject/\n├── bot.py\n├── config.py\n├── sber_vision.py\n├── database.py\n└── requirements.txt\n```"
+        "💻 **Пример кода на Python**\n\n"
+        "Вот простой пример, который читает имя пользователя и выводит приветствие:\n\n"
+        "```python\nname = input('Как тебя зовут? ')  # Запрос ввода\nprint(f'Привет, {name}!')  # Вывод приветствия\n```\n\n"
+        "**Объяснение:**\n"
+        "1. `input()` - функция для получения ввода от пользователя\n"
+        "2. `print()` - функция для вывода текста\n"
+        "3. `f-строка` - удобный способ форматирования строк"
     ],
     "общий": [
         "🧠 **Анализ запроса**\n\n"
-        "Для распознавания текста и формул в Telegram группе:\n\n"
-        "**Этапы внедрения:**\n"
-        "1. **Подготовка инфраструктуры**\n"
-        "   - Сервер/VPS с Python 3.8+\n"
-        "   - База данных (PostgreSQL/Redis)\n"
-        "   - SSL сертификат для вебхуков\n\n"
-        "2. **Интеграция API**\n"
-        "   - SberVision для OCR и распознавания формул\n"
-        "   - Telegram Bot API\n"
-        "   - Дополнительные сервисы (если нужно)\n\n"
-        "3. **Разработка логики**\n"
-        "   - Обработка изображений\n"
-        "   - Парсинг математических выражений\n"
-        "   - Хранение и поиск результатов\n\n"
-        "4. **Тестирование и деплой**\n"
-        "   - Юнит-тесты\n"
-        "   - Нагрузочное тестирование\n"
-        "   - Мониторинг и логирование\n\n"
-        "⏱️ **Примерные сроки**: 2-3 недели для MVP"
+        "ИИ-модели могут генерировать код на различных языках программирования. Вот основные возможности:\n\n"
+        "**Для Python:**\n"
+        "• Простые скрипты и утилиты\n"
+        "• Обработка данных и анализ\n"
+        "• Веб-приложения и API\n"
+        "• Машинное обучение и AI\n\n"
+        "**Для других языков:**\n"
+        "• JavaScript для веб-разработки\n"
+        "• Java для Android приложений\n"
+        "• C++ для системного программирования\n"
+        "• SQL для работы с базами данных\n\n"
+        "⏱️ **Рекомендации:** Уточните язык программирования и задачу для получения более конкретного примера."
     ]
 }
 
 def get_local_fallback_response(user_question: str) -> str:
-    """Генерация локального ответа если API недоступно"""
+    """Генерация локального ответа"""
     question_lower = user_question.lower()
     
     if any(word in question_lower for word in ['код', 'пример', 'программир', 'python', 'javascript']):
@@ -553,7 +463,7 @@ def get_local_fallback_response(user_question: str) -> str:
     return random.choice(responses)
 
 async def get_ai_response(user_question: str, response_type: str = "main") -> Tuple[Optional[str], Optional[str], int]:
-    """Получает ответ от AI"""
+    """Получение ответа от AI"""
     if response_type == "main":
         models = [
             MODELS_CONFIG["main"]["primary"],
@@ -564,7 +474,7 @@ async def get_ai_response(user_question: str, response_type: str = "main") -> Tu
         system_prompt = {
             "role": "system",
             "content": (
-                "Ты Иван Иваныч — эксперт в технологиях и футуристике. "
+                "Ты Иван Иваныч — эксперт в технологиях. "
                 "Отвечай ясно и по делу. Используй Markdown для форматирования. "
                 "Для кода используй тройные кавычки с указанием языка. "
                 "Всегда закрывай блок кода. "
@@ -601,7 +511,7 @@ async def get_ai_response(user_question: str, response_type: str = "main") -> Tu
 async def get_parallel_responses(user_question: str) -> Tuple[
     Optional[str], Optional[str], Optional[str], Optional[str], int, int
 ]:
-    """Параллельное получение ответов от обеих систем"""
+    """Параллельное получение ответов"""
     main_task = asyncio.create_task(get_ai_response(user_question, "main"))
     deepseek_task = asyncio.create_task(get_ai_response(user_question, "deepseek"))
     
@@ -616,34 +526,31 @@ async def get_parallel_responses(user_question: str) -> Tuple[
     
     return main_response, deepseek_response, main_model, deepseek_model, main_code_blocks, deepseek_code_blocks
 
-# ==================== ОБРАБОТЧИКИ ТЕЛЕГРАМ ====================
+# ==================== ОБРАБОТЧИКИ ====================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     """Команда /start"""
     welcome = (
         "👋 Привет! Я Иван Иваныч — бот с продвинутыми ИИ-моделями\n\n"
-        "🚀 **Новые мощные модели:**\n"
+        "🚀 **Доступные модели:**\n"
         "• **Llama 3.3 70B** — мощная аналитическая модель\n"
-        "• **DeepSeek R1** — глубокая аналитика с рассуждениями\n"
-        "• **Qwen3 Coder** — для программирования и кода\n"
-        "• **Qwen 2.5 7B** — быстрая и эффективная\n\n"
-        "🤖 **Особенности:**\n"
-        "• Работающая подсветка кода в Telegram\n"
-        "• Увеличенные таймауты для глубоких моделей\n"
-        "• Параллельная генерация от двух ИИ\n"
-        "• Статистика ответов и времени\n"
-        "• Улучшенная обработка блоков кода\n\n"
-        "⚡ **Пример кода с подсветкой:**\n"
+        "• **DeepSeek R1** — глубокая аналитика\n"
+        "• **Qwen модели** — различные задачи\n\n"
+        "🤖 **Возможности:**\n"
+        "• Генерация кода с подсветкой\n"
+        "• Технический анализ\n"
+        "• Ответы на вопросы\n\n"
+        "⚡ **Пример кода:**\n"
         "```python\nprint('Привет, мир!')\n```\n\n"
         "❓ Просто задайте вопрос с '?' в конце"
     )
-    await send_safe_message_final(message.chat.id, welcome, message.message_id)
+    await send_safe_message(message.chat.id, welcome, message.message_id)
 
 @dp.message(Command("status"))
 async def cmd_status(message: types.Message):
-    """Команда /status - проверка доступности моделей"""
+    """Команда /status"""
     status_text = "🔄 Проверяю доступность моделей..."
-    status_msg = await send_safe_message_final(message.chat.id, status_text, message.message_id)
+    status_msg = await send_safe_message(message.chat.id, status_text, message.message_id)
     
     try:
         test_models = [
@@ -664,23 +571,22 @@ async def cmd_status(message: types.Message):
             status_report += f"{emoji} `{name_short}`{time_info}\n"
         
         status_report += f"\n⏱️ **Таймауты:** Быстрые: {MODEL_TIMEOUTS['fast']}с, Средние: {MODEL_TIMEOUTS['medium']}с, Глубокие: {MODEL_TIMEOUTS['slow']}с"
-        status_report += f"\n🔧 **DeepSeek R1:** уменьшен max_tokens до 800 для избежания обрезания"
         
         if status_msg:
-            await status_msg.edit_text(status_report, parse_mode="MarkdownV2")
+            await status_msg.edit_text(status_report, parse_mode="HTML")
         else:
-            await send_safe_message_final(message.chat.id, status_report, message.message_id)
+            await send_safe_message(message.chat.id, status_report, message.message_id)
             
     except Exception as e:
         error_text = f"❌ Ошибка проверки: {str(e)[:100]}"
         if status_msg:
             await status_msg.edit_text(error_text, parse_mode=None)
         else:
-            await send_safe_message_final(message.chat.id, error_text, message.message_id)
+            await send_safe_message(message.chat.id, error_text, message.message_id)
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
 async def handle_question(message: types.Message):
-    """Обработка вопросов с подсветкой кода"""
+    """Обработка вопросов"""
     user_question = message.text.strip()
     chat_id = message.chat.id
     
@@ -689,8 +595,8 @@ async def handle_question(message: types.Message):
     
     processing_msg = None
     try:
-        processing_text = "🤔 Две ИИ-модели анализируют вопрос параллельно..."
-        processing_msg = await send_safe_message_final(chat_id, processing_text, message.message_id)
+        processing_text = "🤔 Две ИИ-модели анализируют вопрос..."
+        processing_msg = await send_safe_message(chat_id, processing_text, message.message_id)
         
         if not processing_msg:
             return
@@ -719,7 +625,7 @@ async def handle_question(message: types.Message):
                 parse_mode=None
             )
             
-            await send_long_message_final(
+            await send_long_message(
                 chat_id,
                 f"🤖 **Основной ответ:**\n\n{main_response}",
                 message.message_id
@@ -730,7 +636,7 @@ async def handle_question(message: types.Message):
         if deepseek_response and len(deepseek_response) > 100:
             logger.info(f"📤 Отправка аналитического ответа ({len(deepseek_response)} символов)")
             
-            await send_long_message_final(
+            await send_long_message(
                 chat_id,
                 f"🔍 **Детальный анализ:**\n\n{deepseek_response}",
                 message.message_id
@@ -787,7 +693,7 @@ async def handle_question(message: types.Message):
             fallback_response = get_local_fallback_response(user_question)
             await processing_msg.edit_text("⚠️ Использую локальную базу знаний...", parse_mode=None)
             
-            await send_long_message_final(
+            await send_long_message(
                 chat_id, 
                 f"📚 **База знаний:**\n\n{fallback_response}", 
                 message.message_id
@@ -809,30 +715,23 @@ async def handle_question(message: types.Message):
         try:
             fallback = get_local_fallback_response(user_question)
             await processing_msg.edit_text("⚠️ Произошла ошибка, но вот что я могу предложить:", parse_mode=None)
-            await send_long_message_final(chat_id, f"💡 **Предложение:**\n\n{fallback}", message.message_id)
+            await send_long_message(chat_id, f"💡 **Предложение:**\n\n{fallback}", message.message_id)
         except Exception as e2:
             logger.error(f"❌ Даже fallback не сработал: {e2}")
             if processing_msg:
                 await processing_msg.edit_text("❌ Произошла ошибка. Попробуйте позже.", parse_mode=None)
 
-# ==================== ЗАПУСК БОТА ====================
+# ==================== ЗАПУСК ====================
 async def main():
     """Основная функция запуска"""
     logger.info("=" * 60)
-    logger.info("🚀 Бот IvanIvanych запускается с улучшенными настройками...")
+    logger.info("🚀 Бот IvanIvanych запускается...")
     logger.info("🤖 ОСНОВНЫЕ МОДЕЛИ:")
     logger.info(f"  • {MODELS_CONFIG['main']['primary']}")
     logger.info(f"  • {MODELS_CONFIG['main']['backup']}")
     logger.info("🤖 АНАЛИТИЧЕСКИЕ МОДЕЛИ:")
     logger.info(f"  • {MODELS_CONFIG['deepseek']['primary']}")
     logger.info(f"  • {MODELS_CONFIG['deepseek']['backup']}")
-    logger.info("⏱️ ТАЙМАУТЫ:")
-    logger.info(f"  • Быстрые модели: {MODEL_TIMEOUTS['fast']}с")
-    logger.info(f"  • Средние модели: {MODEL_TIMEOUTS['medium']}с")
-    logger.info(f"  • Глубокие модели: {MODEL_TIMEOUTS['slow']}с")
-    logger.info("🔧 СПЕЦИАЛЬНЫЕ НАСТРОЙКИ:")
-    logger.info("  • DeepSeek R1: max_tokens уменьшен до 800")
-    logger.info("  • Убраны Gemma модели из-за ошибок API")
     logger.info("=" * 60)
     
     try:
