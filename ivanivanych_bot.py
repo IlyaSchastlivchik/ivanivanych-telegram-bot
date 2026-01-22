@@ -5,7 +5,8 @@ import aiohttp
 import re
 import time
 import unicodedata
-from typing import Optional, List, Tuple
+import json
+from typing import Optional, List, Tuple, Dict, Any
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ChatAction
@@ -31,18 +32,18 @@ if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     exit(1)
 
 # Конфигурация OpenRouter API
-OPENROUTER_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1") + "/chat/completions"
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 
 # Основная модель (Llama)
 OPENROUTER_MODEL_MAIN = "meta-llama/llama-3.3-70b-instruct:free"
-
 # Модель DeepSeek для анализа ответов
 OPENROUTER_MODEL_DEEPSEEK = "deepseek/deepseek-r1-0528:free"
 
 # Настройки генерации
 GENERATION_CONFIG_MAIN = {
     "temperature": 0.85,
-    "max_tokens": 1200,
+    "max_tokens": 1000,
     "top_p": 0.92,
     "frequency_penalty": 0.15,
     "presence_penalty": 0.08,
@@ -50,7 +51,7 @@ GENERATION_CONFIG_MAIN = {
 
 GENERATION_CONFIG_DEEPSEEK = {
     "temperature": 0.75,
-    "max_tokens": 1600,
+    "max_tokens": 1200,
     "top_p": 0.88,
     "frequency_penalty": 0.1,
     "presence_penalty": 0.05,
@@ -60,83 +61,71 @@ GENERATION_CONFIG_DEEPSEEK = {
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# ==================== УТИЛИТЫ ЭКРАНИРОВАНИЯ И ОЧИСТКИ ====================
+# ==================== УТИЛИТЫ ОБРАБОТКИ ТЕКСТА ====================
 def fix_unbalanced_backticks(text: str) -> str:
     """
     Исправляет нечётное количество обратных кавычек в тексте.
-    Это КРИТИЧЕСКАЯ функция для работы с кодом от DeepSeek.
+    Возвращает текст с чётным количеством кавычек.
     """
     if not text:
         return text
     
-    # Считаем кавычки
-    backtick_count = text.count('`')
+    # Считаем общее количество кавычек
+    total_backticks = text.count('`')
     
-    if backtick_count % 2 == 0:
-        return text  # Всё в порядке
-    
-    logger.warning(f"⚠️ Найдено нечётное количество кавычек: {backtick_count}. Исправляем...")
-    
-    # Ищем все позиции кавычек
-    positions = [m.start() for m in re.finditer('`', text)]
-    
-    if not positions:
+    if total_backticks == 0:
         return text
     
-    # Определяем, нужно добавить или удалить кавычку
-    if backtick_count % 2 == 1:
-        # Нечётное - нужно добавить одну кавычку
-        # Добавляем в конец, если это безопасно
-        last_backtick_pos = positions[-1]
-        last_50_chars = text[last_backtick_pos:min(last_backtick_pos + 50, len(text))]
-        
-        # Проверяем, не является ли последняя кавычка частью блока кода
-        if '```' in last_50_chars:
-            # Это блок кода - добавляем закрывающие ```
-            text += '```'
-            logger.info("✅ Добавлены закрывающие ``` для блока кода")
-        else:
-            # Одиночная кавычка
-            text += '`'
-            logger.info("✅ Добавлена закрывающая `")
+    # Если количество чётное - возвращаем как есть
+    if total_backticks % 2 == 0:
+        return text
     
-    # Проверяем блоки кода
-    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)(?:\n```|$)'
-    matches = list(re.finditer(code_block_pattern, text))
+    logger.warning(f"⚠️ Найдено нечётное количество кавычек: {total_backticks}. Исправляем...")
     
-    for match in matches:
-        if not match.group(0).endswith('```'):
-            # Незакрытый блок кода
-            logger.warning(f"⚠️ Найден незакрытый блок кода, добавляем ```")
-            start_pos = match.start()
-            # Находим позицию для добавления ```
-            end_pos = text.rfind('\n', start_pos)
-            if end_pos == -1:
-                end_pos = len(text)
-            text = text[:end_pos] + '\n```' + text[end_pos:]
+    # Ищем незакрытые блоки кода
+    code_block_pattern = r'```(?:[a-zA-Z0-9]*\n)?(.*?)(?:\n```|$)'
+    matches = list(re.finditer(code_block_pattern, text, re.DOTALL))
+    
+    # Если есть незакрытые блоки кода
+    if matches:
+        for match in matches:
+            if not text[match.end()-3:match.end()] == '```':
+                # Это незакрытый блок кода
+                end_pos = text.rfind('\n', match.start(), len(text))
+                if end_pos == -1:
+                    text = text + '\n```'
+                else:
+                    text = text[:end_pos] + '\n```' + text[end_pos:]
+                logger.info("✅ Добавлены закрывающие ``` для блока кода")
+                return text
+    
+    # Если это просто нечётное количество одиночных кавычек
+    # Добавляем одну кавычку в конец (самый безопасный вариант)
+    text += '`'
+    logger.info(f"✅ Добавлена закрывающая кавычка. Теперь кавычек: {total_backticks + 1}")
     
     return text
 
-def clean_text_final(text: str) -> str:
+def clean_text_safe(text: str) -> str:
     """
-    Финальная очистка текста с исправлением кавычек.
+    Безопасная очистка текста от опасных символов.
+    Сохраняет форматирование и блоки кода.
     """
     if not text:
         return ""
     
-    # Сначала исправляем кавычки
+    # Сначала фиксируем кавычки
     text = fix_unbalanced_backticks(text)
     
-    # Удаляем опасные управляющие символы (но сохраняем \n, \t, \r, `)
+    # Удаляем опасные управляющие символы
     cleaned = []
     for char in text:
         cat = unicodedata.category(char)
         if cat[0] == 'C':  # Управляющие символы
+            # Разрешаем только безопасные символы
             if char in ['\n', '\t', '\r', '`']:
                 cleaned.append(char)
-            else:
-                # Удаляем опасные управляющие символы
-                pass
+            # Иначе удаляем
         else:
             cleaned.append(char)
     
@@ -158,49 +147,44 @@ def clean_text_final(text: str) -> str:
     
     return text
 
-def escape_markdown_v2_with_code(text: str) -> str:
+def escape_markdown_v2_smart(text: str) -> str:
     """
-    Экранирование MarkdownV2 с правильной обработкой кода.
+    Умное экранирование MarkdownV2.
+    Сохраняет блоки кода и правильно экранирует остальной текст.
     """
-    # Очищаем и исправляем кавычки
-    text = clean_text_final(text)
+    # Очищаем текст
+    text = clean_text_safe(text)
     
-    # ШАГ 1: Защищаем блоки кода
+    # ШАГ 1: Защищаем блоки кода ```
     code_blocks = []
-    
-    # Блоки кода с ```
-    code_block_pattern = r'```(?:[\w]*)\n([\s\S]*?)\n```'
-    
-    def replace_code_block(match):
+    def protect_code_block(match):
         placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
         code_blocks.append((placeholder, match.group(0)))
         return placeholder
     
-    text = re.sub(code_block_pattern, replace_code_block, text)
+    # Регулярка для блоков кода с языком и без
+    text = re.sub(r'```[a-zA-Z0-9]*\n[\s\S]*?\n```', protect_code_block, text)
     
-    # ШАГ 2: Защищаем inline код
-    inline_blocks = []
-    inline_pattern = r'`([^`\n]+)`'
-    
-    def replace_inline_code(match):
-        placeholder = f"__INLINE_CODE_{len(inline_blocks)}__"
-        inline_blocks.append((placeholder, match.group(0)))
+    # ШАГ 2: Защищаем inline код `
+    inline_codes = []
+    def protect_inline_code(match):
+        placeholder = f"__INLINE_CODE_{len(inline_codes)}__"
+        inline_codes.append((placeholder, match.group(0)))
         return placeholder
     
-    text = re.sub(inline_pattern, replace_inline_code, text)
+    text = re.sub(r'`[^`\n]+`', protect_inline_code, text)
     
     # ШАГ 3: Экранируем оставшийся текст
-    # Экранируем обратные слеши
+    # Сначала экранируем обратные слеши
     text = text.replace('\\', '\\\\')
     
-    # Экранируем остальные спецсимволы MarkdownV2
-    chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    
-    for char in chars_to_escape:
-        text = text.replace(char, '\\' + char)
+    # Экранируем специальные символы MarkdownV2
+    special_chars = '_*[]()~>#+-=|{}.!'
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
     
     # ШАГ 4: Восстанавливаем inline код
-    for placeholder, inline_code in inline_blocks:
+    for placeholder, inline_code in inline_codes:
         text = text.replace(placeholder, inline_code)
     
     # ШАГ 5: Восстанавливаем блоки кода
@@ -209,48 +193,67 @@ def escape_markdown_v2_with_code(text: str) -> str:
     
     return text
 
-def convert_to_html(text: str) -> str:
+def text_to_html_safe(text: str) -> str:
     """
-    Конвертирует Markdown в HTML для fallback.
+    Конвертирует текст с Markdown в безопасный HTML.
     """
-    # Блоки кода с ```
-    text = re.sub(r'```(?:(\w+)\n)?([\s\S]*?)\n```', 
-                 lambda m: f'<pre><code class="language-{m.group(1) or ""}">{m.group(2)}</code></pre>', 
-                 text)
+    text = clean_text_safe(text)
     
-    # Inline код с `
+    # Блоки кода с языком
+    def code_block_to_html(match):
+        lang_match = re.match(r'```([a-zA-Z0-9]+)\n', match.group(0))
+        if lang_match:
+            lang = lang_match.group(1)
+            code = match.group(0)[len(lang)+4:-3]
+            return f'<pre><code class="language-{lang}">{code}</code></pre>'
+        else:
+            # Блок кода без языка
+            code = match.group(0)[3:-3]
+            return f'<pre><code>{code}</code></pre>'
+    
+    text = re.sub(r'```[a-zA-Z0-9]*\n[\s\S]*?\n```', code_block_to_html, text)
+    
+    # Inline код
     text = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', text)
     
     # Жирный текст
     text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__([^_]+)__', r'<b>\1</b>', text)
     
     # Курсив
     text = re.sub(r'\*([^*]+)\*', r'<i>\1</i>', text)
+    text = re.sub(r'_([^_]+)_', r'<i>\1</i>', text)
     
     # Подчеркивание
-    text = re.sub(r'__([^_]+)__', r'<u>\1</u>', text)
+    text = re.sub(r'~~([^~]+)~~', r'<u>\1</u>', text)
     
-    # Заголовки
-    text = re.sub(r'^### (.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
-    text = re.sub(r'^## (.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
-    text = re.sub(r'^# (.+)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
+    # Заголовки (только для отдельных строк)
+    lines = text.split('\n')
+    result_lines = []
+    for line in lines:
+        if line.startswith('### '):
+            result_lines.append(f'<h3>{line[4:]}</h3>')
+        elif line.startswith('## '):
+            result_lines.append(f'<h2>{line[3:]}</h2>')
+        elif line.startswith('# '):
+            result_lines.append(f'<h1>{line[2:]}</h1>')
+        else:
+            result_lines.append(line)
+    
+    text = '\n'.join(result_lines)
     
     # Списки
+    text = re.sub(r'^[*-] (.+)$', r'<li>\1</li>', text, flags=re.MULTILINE)
     lines = text.split('\n')
-    in_list = False
     result_lines = []
+    in_list = False
     
     for line in lines:
-        if line.strip().startswith('- '):
+        if line.startswith('<li>'):
             if not in_list:
                 result_lines.append('<ul>')
                 in_list = True
-            result_lines.append(f'<li>{line[2:].strip()}</li>')
-        elif line.strip().startswith('* '):
-            if not in_list:
-                result_lines.append('<ul>')
-                in_list = True
-            result_lines.append(f'<li>{line[2:].strip()}</li>')
+            result_lines.append(line)
         else:
             if in_list:
                 result_lines.append('</ul>')
@@ -260,138 +263,134 @@ def convert_to_html(text: str) -> str:
     if in_list:
         result_lines.append('</ul>')
     
-    return '\n'.join(result_lines)
+    text = '\n'.join(result_lines)
+    
+    return text
 
-async def send_message_with_code(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
+# ==================== ФУНКЦИИ ОТПРАВКИ ====================
+async def send_message_safe(
+    chat_id: int, 
+    text: str, 
+    reply_to_message_id: Optional[int] = None,
+    max_retries: int = 3
+) -> Optional[types.Message]:
     """
-    Умная отправка сообщений с кодом.
-    Пытается использовать MarkdownV2, потом HTML, потом plain text.
+    Умная отправка сообщений с автовыбором метода.
+    Пробует MarkdownV2 → HTML → Plain text.
     """
+    if not text or len(text.strip()) == 0:
+        logger.error("❌ Пустой текст для отправки")
+        return None
+    
     # Очищаем текст
-    cleaned_text = clean_text_final(text)
+    cleaned_text = clean_text_safe(text)
+    original_length = len(cleaned_text)
+    logger.info(f"📤 Подготовка сообщения длиной {original_length} символов...")
     
     # Проверяем кавычки
     backtick_count = cleaned_text.count('`')
-    logger.info(f"📤 Отправка сообщения, кавычек: {backtick_count}")
-    
-    # ПРОБУЕМ MARKDOWNV2
-    try:
-        escaped_text = escape_markdown_v2_with_code(cleaned_text)
-        
-        # Проверяем, что блоки кода закрыты
-        code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', escaped_text)
-        if code_blocks:
-            logger.info(f"📤 Найдено {len(code_blocks)} блок(ов) кода для MarkdownV2")
-        
-        kwargs = {
-            "chat_id": chat_id,
-            "text": escaped_text,
-            "parse_mode": "MarkdownV2"
-        }
-        
-        if reply_to_message_id:
-            kwargs["reply_to_message_id"] = reply_to_message_id
-        
-        result = await bot.send_message(**kwargs)
-        logger.info(f"✅ Отправлено с MarkdownV2, длина: {len(escaped_text)} символов")
-        return result
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.warning(f"⚠️ MarkdownV2 не сработал: {error_msg}")
-        
-        # ПРОБУЕМ HTML
-        try:
-            html_text = convert_to_html(cleaned_text)
-            
-            kwargs = {
-                "chat_id": chat_id,
-                "text": html_text,
-                "parse_mode": "HTML"
-            }
-            
-            if reply_to_message_id:
-                kwargs["reply_to_message_id"] = reply_to_message_id
-            
-            result = await bot.send_message(**kwargs)
-            logger.info(f"✅ Отправлено с HTML, длина: {len(html_text)} символов")
-            return result
-            
-        except Exception as html_e:
-            logger.warning(f"⚠️ HTML не сработал: {html_e}")
-    
-    # ПРОБУЕМ PLAIN TEXT
-    try:
-        # Упрощаем текст для plain text
-        plain_text = cleaned_text
-        # Убираем лишние обратные кавычки если они вызывают проблемы
-        plain_text = re.sub(r'```(?:[\w]*)\n', '[КОД]\n', plain_text)
-        plain_text = plain_text.replace('```', '[/КОД]\n')
-        plain_text = plain_text.replace('`', "'")  # Заменяем одиночные кавычки
-        
-        kwargs = {
-            "chat_id": chat_id,
-            "text": plain_text,
-            "parse_mode": None
-        }
-        
-        if reply_to_message_id:
-            kwargs["reply_to_message_id"] = reply_to_message_id
-        
-        result = await bot.send_message(**kwargs)
-        logger.info(f"✅ Отправлено без форматирования, длина: {len(plain_text)} символов")
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ Не удалось отправить сообщение вообще: {e}")
-        return None
-
-async def send_long_message_final(chat_id: int, text: str, reply_to_message_id: int = None):
-    """
-    Финальная версия отправки длинных сообщений.
-    """
-    original_length = len(text)
-    logger.info(f"📤 Подготовка сообщения длиной {original_length} символов...")
+    logger.info(f"📤 Кавычек в тексте: {backtick_count}")
     
     # Проверяем блоки кода
-    code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', text)
-    logger.info(f"📤 Блоков кода найдено: {len(code_blocks)}")
+    code_blocks = re.findall(r'```[a-zA-Z0-9]*\n[\s\S]*?\n```', cleaned_text)
+    inline_codes = re.findall(r'`[^`\n]+`', cleaned_text)
+    logger.info(f"📤 Блоков кода: {len(code_blocks)}, inline кода: {len(inline_codes)}")
     
-    # Разбиваем на части если нужно (сохраняя блоки кода)
-    if original_length <= 4000:
-        parts = [text]
-    else:
-        # Простое разбиение, стараясь не разрывать блоки кода
-        parts = []
-        current_part = ""
-        lines = text.split('\n')
-        
-        for line in lines:
-            if len(current_part) + len(line) + 1 <= 4000:
-                current_part += line + "\n"
-            else:
-                if current_part:
-                    parts.append(current_part.strip())
-                current_part = line + "\n"
-        
-        if current_part:
-            parts.append(current_part.strip())
+    methods = [
+        ("MarkdownV2", "escape_markdown_v2_smart"),
+        ("HTML", "text_to_html_safe"),
+        ("Plain", None)
+    ]
+    
+    for method_name, transform_func in methods:
+        for attempt in range(max_retries):
+            try:
+                if transform_func == "escape_markdown_v2_smart":
+                    transformed_text = escape_markdown_v2_smart(cleaned_text)
+                    parse_mode = "MarkdownV2"
+                elif transform_func == "text_to_html_safe":
+                    transformed_text = text_to_html_safe(cleaned_text)
+                    parse_mode = "HTML"
+                else:
+                    transformed_text = cleaned_text
+                    # Для plain text удаляем лишние кавычки
+                    transformed_text = re.sub(r'```[a-zA-Z0-9]*\n', '[КОД]\n', transformed_text)
+                    transformed_text = transformed_text.replace('```', '[/КОД]\n')
+                    transformed_text = transformed_text.replace('`', "'")
+                    parse_mode = None
+                
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": transformed_text,
+                }
+                
+                if parse_mode:
+                    kwargs["parse_mode"] = parse_mode
+                
+                if reply_to_message_id:
+                    kwargs["reply_to_message_id"] = reply_to_message_id
+                
+                # Проверяем длину
+                if len(transformed_text) > 4096:
+                    logger.warning(f"⚠️ Текст слишком длинный ({len(transformed_text)} символов), разбиваем...")
+                    return await send_long_message(chat_id, cleaned_text, reply_to_message_id)
+                
+                message = await bot.send_message(**kwargs)
+                logger.info(f"✅ Отправлено с {method_name} (попытка {attempt+1}/{max_retries})")
+                return message
+                
+            except Exception as e:
+                error_msg = str(e)
+                if attempt < max_retries - 1:
+                    logger.warning(f"⚠️ {method_name} не сработал (попытка {attempt+1}): {error_msg[:100]}")
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                else:
+                    logger.error(f"❌ {method_name} полностью не сработал: {error_msg[:100]}")
+    
+    logger.error("❌ Все методы отправки не сработали")
+    return None
+
+async def send_long_message(
+    chat_id: int, 
+    text: str, 
+    reply_to_message_id: Optional[int] = None,
+    max_length: int = 3500
+) -> None:
+    """
+    Отправляет длинные сообщения, разбивая на части.
+    """
+    if len(text) <= max_length:
+        await send_message_safe(chat_id, text, reply_to_message_id)
+        return
+    
+    logger.info(f"📤 Разбиваем сообщение длиной {len(text)} символов...")
+    
+    # Простое разбиение по абзацам
+    parts = []
+    current_part = ""
+    paragraphs = text.split('\n\n')
+    
+    for para in paragraphs:
+        if len(current_part) + len(para) + 2 <= max_length:
+            current_part += para + "\n\n"
+        else:
+            if current_part:
+                parts.append(current_part.strip())
+            current_part = para + "\n\n"
+    
+    if current_part:
+        parts.append(current_part.strip())
     
     logger.info(f"📤 Разбито на {len(parts)} частей")
     
     for i, part in enumerate(parts):
-        logger.info(f"📤 Отправка части {i+1}/{len(parts)}, длина: {len(part)} символов")
+        logger.info(f"📤 Отправка части {i+1}/{len(parts)} ({len(part)} символов)...")
         
-        message = await send_message_with_code(
+        await send_message_safe(
             chat_id=chat_id,
             text=part,
             reply_to_message_id=reply_to_message_id if i == 0 else None
         )
-        
-        if message:
-            logger.info(f"✅ Часть {i+1}/{len(parts)} отправлена")
-        else:
-            logger.error(f"❌ Не удалось отправить часть {i+1}/{len(parts)}")
         
         if i < len(parts) - 1:
             await asyncio.sleep(0.3)
@@ -402,12 +401,12 @@ SYSTEM_PROMPT_MAIN = {
     "content": (
         "Ты Иван Иваныч — эксперт в футуристике и технологиях будущего. "
         "Отвечай ясно, по делу, с технической точностью. "
-        "Используй Markdown для форматирования: **жирный** для ключевых терминов. "
-        "Если даёшь пример кода, используй ТРОЙНЫЕ обратные кавычки:"
+        "Используй Markdown для форматирования: **жирный** для ключевых терминов, `inline код` для фрагментов кода. "
+        "Для блоков кода используй тройные обратные кавычки с указанием языка:"
         "```python\nprint('Пример')\n```"
-        "ВАЖНО: Всегда проверяй, что количество обратных кавычек ` в твоём ответе ЧЁТНОЕ. "
-        "Если нечётное - добавь недостающую кавычку в конец. "
-        "Длина ответа не должна превышать 1000 символов."
+        "ВАЖНО: Всегда проверяй, что блоки кода закрыты тремя кавычками ```. "
+        "Не используй LaTeX или другие специальные символы. "
+        "Длина ответа должна быть 500-1000 символов."
     )
 }
 
@@ -416,20 +415,27 @@ SYSTEM_PROMPT_DEEPSEEK = {
     "content": (
         "Ты — технический аналитик. Ответь на вопрос пользователя самостоятельно, "
         "предоставив глубокий анализ, конкретные детали и практические шаги. "
-        "ИСПОЛЬЗУЙ Markdown для форматирования: **жирный** для заголовков. "
-        "Если даёшь пример кода, ОБЯЗАТЕЛЬНО используй тройные обратные кавычки:"
-        "```python\nкод\n```"
-        "КРИТИЧЕСКИ ВАЖНО: Убедись, что количество символов ` в твоём ответе ЧЁТНОЕ. "
-        "Сосчитай кавычки перед отправкой ответа. Если нечётное - добавь ` в конец. "
-        "Пример: 'Вот код: ```python\nprint(1)\n```' - здесь 6 кавычек (чётно). "
-        "Длина ответа не должна превышать 1000 символов. "
-        "Будь максимально конкретным и техничным."
+        "Используй Markdown для форматирования: **заголовки**, `inline код`, списки. "
+        "Для блоков кода всегда используй:"
+        "```язык\nкод\n```"
+        "И ЗАКРЫВАЙ блок кода тремя кавычками! "
+        "Проверь ответ перед отправкой: все блоки кода должны быть закрыты. "
+        "Не используй LaTeX. Будь конкретным и техничным. "
+        "Длина ответа: 800-1200 символов."
     )
 }
 
-# ==================== ФУНКЦИИ ДЛЯ OPENROUTER ====================
-async def ask_openrouter_final(user_question: str, model: str, system_prompt: dict, config: dict) -> Optional[str]:
-    """Финальная версия запроса с исправлением кавычек"""
+# ==================== OPENROUTER ФУНКЦИИ ====================
+async def ask_openrouter(
+    user_question: str, 
+    model: str, 
+    system_prompt: Dict[str, str], 
+    config: Dict[str, Any],
+    timeout: int = 120
+) -> Optional[str]:
+    """
+    Улучшенная функция запроса к OpenRouter с обработкой ошибок.
+    """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
@@ -449,73 +455,102 @@ async def ask_openrouter_final(user_question: str, model: str, system_prompt: di
     model_name = model.split('/')[-1] if '/' in model else model
     logger.info(f"🚀 Запрос к {model_name}...")
     
-    timeout_seconds = 150 if "deepseek" in model.lower() else 100
-    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
     
     try:
         start_time = time.time()
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
             async with session.post(OPENROUTER_URL, headers=headers, json=data) as response:
                 elapsed = time.time() - start_time
                 
                 if response.status == 200:
                     result = await response.json()
+                    
+                    # Детальный лог для отладки
+                    logger.debug(f"📊 Ответ от {model_name}: {json.dumps(result, ensure_ascii=False)[:500]}")
+                    
                     if 'choices' in result and len(result['choices']) > 0:
                         response_text = result['choices'][0]['message'].get('content', '').strip()
                         
-                        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: фиксируем кавычки сразу
+                        if not response_text:
+                            logger.warning(f"⚠️ {model_name} вернул пустой ответ")
+                            return None
+                        
+                        # Исправляем кавычки
                         original_backticks = response_text.count('`')
-                        response_text = fix_unbalanced_backticks(response_text)
-                        fixed_backticks = response_text.count('`')
+                        fixed_text = fix_unbalanced_backticks(response_text)
+                        fixed_backticks = fixed_text.count('`')
                         
                         if original_backticks != fixed_backticks:
                             logger.info(f"✅ {model_name}: исправлено кавычек {original_backticks} → {fixed_backticks}")
                         
-                        logger.info(f"✅ {model_name} ответил за {elapsed:.1f}с, {len(response_text)} символов, кавычек: {fixed_backticks}")
-                        
-                        return response_text
+                        logger.info(f"✅ {model_name} ответил за {elapsed:.1f}с, {len(fixed_text)} символов")
+                        return fixed_text
                     else:
-                        logger.error(f"❌ Неверный формат ответа от {model_name}")
+                        # Пробуем получить сообщение об ошибке
+                        error_detail = result.get('error', {}).get('message', 'Неизвестная ошибка')
+                        logger.error(f"❌ Ошибка {model_name}: {error_detail}")
                         return None
+                        
+                elif response.status == 429:
+                    logger.error(f"⏱️ {model_name}: Rate limit exceeded")
+                    return None
+                elif response.status == 502 or response.status == 503:
+                    logger.error(f"🔧 {model_name}: Service temporarily unavailable")
+                    return None
                 else:
                     error_text = await response.text()
-                    logger.error(f"❌ Ошибка {model_name} [{response.status}]: {error_text[:200]}")
+                    logger.error(f"❌ {model_name} ошибка [{response.status}]: {error_text[:200]}")
                     return None
+                    
     except asyncio.TimeoutError:
-        logger.error(f"⏱️ Таймаут {model_name} (> {timeout_seconds}с)")
+        logger.error(f"⏱️ Таймаут {model_name} (> {timeout}с)")
+        return None
+    except aiohttp.ClientError as e:
+        logger.error(f"🌐 Сетевая ошибка {model_name}: {e}")
         return None
     except Exception as e:
-        logger.error(f"⚠️ Ошибка {model_name}: {e}")
+        logger.error(f"⚠️ Неизвестная ошибка {model_name}: {e}")
         return None
 
-async def get_responses_parallel_final(user_question: str) -> Tuple[Optional[str], Optional[str]]:
+async def get_responses_parallel(user_question: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Финальная версия параллельных запросов.
+    Параллельные запросы к обеим моделям.
     """
+    llama_timeout = 100  # Llama может отвечать медленнее
+    deepseek_timeout = 150  # DeepSeek R1 думает дольше
+    
     llama_task = asyncio.create_task(
-        ask_openrouter_final(
+        ask_openrouter(
             user_question=user_question,
             model=OPENROUTER_MODEL_MAIN,
             system_prompt=SYSTEM_PROMPT_MAIN,
-            config=GENERATION_CONFIG_MAIN
+            config=GENERATION_CONFIG_MAIN,
+            timeout=llama_timeout
         )
     )
     
     deepseek_task = asyncio.create_task(
-        ask_openrouter_final(
+        ask_openrouter(
             user_question=user_question,
             model=OPENROUTER_MODEL_DEEPSEEK,
             system_prompt=SYSTEM_PROMPT_DEEPSEEK,
-            config=GENERATION_CONFIG_DEEPSEEK
+            config=GENERATION_CONFIG_DEEPSEEK,
+            timeout=deepseek_timeout
         )
     )
     
-    llama_response, deepseek_response = await asyncio.gather(
-        llama_task, 
-        deepseek_task,
-        return_exceptions=True
-    )
+    try:
+        llama_response, deepseek_response = await asyncio.gather(
+            llama_task, 
+            deepseek_task,
+            return_exceptions=True
+        )
+    except Exception as e:
+        logger.error(f"💥 Ошибка в parallel gather: {e}")
+        llama_response = deepseek_response = None
     
+    # Обрабатываем исключения
     if isinstance(llama_response, Exception):
         logger.error(f"❌ Исключение в Llama: {llama_response}")
         llama_response = None
@@ -525,128 +560,176 @@ async def get_responses_parallel_final(user_question: str) -> Tuple[Optional[str
     
     return llama_response, deepseek_response
 
-# ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
+# ==================== ОБРАБОТЧИКИ ТЕЛЕГРАМ ====================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    """Обработчик команды /start"""
     welcome_text = (
         "👋 Привет! Я Иван Иваныч\n\n"
         "🤖 Две модели ИИ работают параллельно:\n"
-        "• Llama 3.3 — быстрый основной ответ\n"
-        "• DeepSeek R1 — глубокий технический анализ\n\n"
+        "• **Llama 3.3** — быстрый основной ответ\n"
+        "• **DeepSeek R1** — глубокий технический анализ\n\n"
         "⚡ Оба ответа генерируются одновременно!\n\n"
-        "💻 *Работающая подсветка кода!*\n"
-        "Пример кода:\n"
+        "💻 *Полная поддержка кода:*\n"
         "```python\nprint('Привет, мир!')\n```\n\n"
-        "❓ Просто задайте вопрос с '?' в конце"
+        "❓ Просто задайте вопрос с '?' в конце\n\n"
+        "🔧 Бот автоматически исправляет форматирование!"
     )
-    await send_message_with_code(message.chat.id, welcome_text, message.message_id)
+    
+    await send_message_safe(message.chat.id, welcome_text, message.message_id)
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    """Обработчик команды /help"""
+    help_text = (
+        "📖 **Помощь по боту:**\n\n"
+        "• Задавайте вопросы с '?' в конце\n"
+        "• Бот использует две модели параллельно\n"
+        "• Код форматируется автоматически\n"
+        "• Если что-то не работает — попробуйте переформулировать вопрос\n\n"
+        "🔄 **Статус моделей:**\n"
+        f"• Llama 3.3: {'✅' if OPENROUTER_MODEL_MAIN else '❌'}\n"
+        f"• DeepSeek R1: {'✅' if OPENROUTER_MODEL_DEEPSEEK else '❌'}\n\n"
+        "💡 **Совет:** Для технических вопросов DeepSeek даёт более детальные ответы"
+    )
+    
+    await send_message_safe(message.chat.id, help_text, message.message_id)
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
-async def handle_question_final(message: types.Message):
-    """Финальный обработчик вопросов"""
+async def handle_question(message: types.Message):
+    """Основной обработчик вопросов"""
     user_question = message.text.strip()
     chat_id = message.chat.id
     
     username = f"@{message.from_user.username}" if message.from_user.username else f"user_{message.from_user.id}"
-    logger.info(f"🧠 Вопрос от {username}: {user_question[:80]}...")
+    logger.info(f"🧠 Вопрос от {username}: {user_question[:100]}...")
     
     processing_msg = None
     try:
-        # ШАГ 1: Уведомление
+        # Уведомление о начале обработки
         processing_text = "🤔 Две модели ИИ анализируют вопрос параллельно..."
-        processing_msg = await send_message_with_code(chat_id, processing_text, message.message_id)
+        processing_msg = await send_message_safe(chat_id, processing_text, message.message_id)
         
         if not processing_msg:
             logger.error("❌ Не удалось отправить уведомление")
             return
         
-        start_total_time = time.time()
+        start_time = time.time()
         
-        # ШАГ 2: ПАРАЛЛЕЛЬНЫЕ ЗАПРОСЫ
-        logger.info("⚡ Параллельные запросы запущены...")
+        # Параллельные запросы
+        logger.info("⚡ Запуск параллельных запросов...")
         await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         
-        llama_response, deepseek_response = await get_responses_parallel_final(user_question)
+        llama_response, deepseek_response = await get_responses_parallel(user_question)
         
-        # ШАГ 3: LLAMA
+        # Обработка ответов
+        elapsed_time = time.time() - start_time
+        
+        # Сначала Llama
         if llama_response:
-            llama_time = time.time() - start_total_time
-            logger.info(f"📤 Отправка ответа Llama (за {llama_time:.1f}с)...")
+            logger.info(f"📤 Отправка ответа Llama ({len(llama_response)} символов)...")
             
-            await processing_msg.edit_text("✅ Llama ответил! Готовим анализ DeepSeek...", parse_mode=None)
+            # Обновляем статус
+            await processing_msg.edit_text(
+                "✅ Llama ответил! Готовим анализ DeepSeek...",
+                parse_mode=None
+            )
             
-            await send_long_message_final(
+            # Отправляем ответ Llama
+            await send_long_message(
                 chat_id=chat_id,
-                text=f"🤖 Ответ Llama 3.3:\n\n{llama_response}",
+                text=f"🤖 **Ответ Llama 3.3:**\n\n{llama_response}",
                 reply_to_message_id=message.message_id
             )
         else:
-            logger.error("❌ Llama не ответил")
-            await processing_msg.edit_text("❌ Основная модель не ответила. Попробуйте позже.", parse_mode=None)
-            return
+            logger.warning("⚠️ Llama не ответил")
+            # Не прерываем, может быть DeepSeek ответит
         
-        # ШАГ 4: DEEPSEEK
-        if deepseek_response and len(deepseek_response) > 50:
-            logger.info("📤 Отправка ответа DeepSeek...")
+        # Затем DeepSeek
+        if deepseek_response and len(deepseek_response) > 100:
+            logger.info(f"📤 Отправка ответа DeepSeek ({len(deepseek_response)} символов)...")
             
-            await send_long_message_final(
+            await send_long_message(
                 chat_id=chat_id,
-                text=f"🔍 Глубокий анализ DeepSeek R1:\n\n{deepseek_response}",
+                text=f"🔍 **Глубокий анализ DeepSeek R1:**\n\n{deepseek_response}",
                 reply_to_message_id=message.message_id
             )
             
-            total_time = time.time() - start_total_time
-            completion_text = (
-                f"✅ Анализ завершён!\n"
-                f"⏱️ Общее время: {total_time:.1f} секунд\n"
-                f"📊 Llama: {len(llama_response)} символов\n"
-                f"🔍 DeepSeek: {len(deepseek_response)} символов"
-            )
+            # Финальное сообщение
+            if llama_response:
+                completion_text = (
+                    f"✅ Анализ завершён!\n"
+                    f"⏱️ Время: {elapsed_time:.1f} секунд\n"
+                    f"📊 Llama: {len(llama_response)} символов\n"
+                    f"🔍 DeepSeek: {len(deepseek_response)} символов"
+                )
+            else:
+                completion_text = (
+                    f"✅ Анализ завершён (только DeepSeek)!\n"
+                    f"⏱️ Время: {elapsed_time:.1f} секунд\n"
+                    f"🔍 DeepSeek: {len(deepseek_response)} символов"
+                )
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Успешно! Время: {total_time:.1f}с")
+            logger.info(f"✅ Успешно! Общее время: {elapsed_time:.1f}с")
             
-        else:
-            logger.warning("⚠️ DeepSeek не вернул ответ")
-            total_time = time.time() - start_total_time
-            fallback_text = (
-                f"✅ Основной ответ готов!\n"
-                f"⏱️ Время: {total_time:.1f} секунд\n"
+        elif llama_response:
+            # Только Llama ответил
+            completion_text = (
+                f"✅ Ответ готов!\n"
+                f"⏱️ Время: {elapsed_time:.1f} секунд\n"
+                f"📊 Llama: {len(llama_response)} символов\n"
                 f"ℹ️ DeepSeek временно недоступен"
             )
             
-            await processing_msg.edit_text(fallback_text, parse_mode=None)
+            await processing_msg.edit_text(completion_text, parse_mode=None)
+            logger.info(f"✅ Только Llama ответил за {elapsed_time:.1f}с")
+            
+        else:
+            # Никто не ответил
+            error_text = "❌ Обе модели не ответили. Пожалуйста, попробуйте позже."
+            await processing_msg.edit_text(error_text, parse_mode=None)
+            logger.error("❌ Ни одна модель не ответила")
         
     except asyncio.TimeoutError:
         logger.error("⏱️ Общий таймаут обработки")
         if processing_msg:
             await processing_msg.edit_text("⏱️ Время обработки истекло. Попробуйте позже.", parse_mode=None)
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
-        error_text = f"⚠️ Ошибка обработки: {str(e)[:200]}"
+        logger.error(f"❌ Критическая ошибка в обработчике: {e}", exc_info=True)
         if processing_msg:
-            await send_message_with_code(chat_id, error_text)
+            error_msg = f"⚠️ Ошибка обработки: {str(e)[:150]}"
+            await send_message_safe(chat_id, error_msg)
+
+@dp.message()
+async def handle_other_messages(message: types.Message):
+    """Обработчик всех остальных сообщений"""
+    if message.text and len(message.text.strip()) > 3:
+        response = "🤔 Задайте вопрос с '?' в конце, чтобы получить развёрнутый ответ от обеих моделей ИИ."
+        await send_message_safe(message.chat.id, response, message.message_id)
 
 # ==================== ЗАПУСК БОТА ====================
-async def main_final():
-    """Финальная версия запуска"""
+async def main():
+    """Основная функция запуска бота"""
     logger.info("=" * 60)
     logger.info(f"🚀 Бот IvanIvanych запускается...")
     logger.info(f"🤖 Модели: {OPENROUTER_MODEL_MAIN} + {OPENROUTER_MODEL_DEEPSEEK}")
     logger.info(f"⚡ Архитектура: Параллельная генерация")
-    logger.info(f"💻 Функция: Автоисправление кавычек DeepSeek")
+    logger.info(f"💻 Функция: Автоисправление кавычек и кода")
     logger.info("=" * 60)
     
     try:
+        # Очищаем предыдущие обновления
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("🔄 Очищены предыдущие обновления")
         
+        # Запускаем поллинг
         await dp.start_polling(bot, skip_updates=True)
         
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем")
     except Exception as e:
-        logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
+        logger.error(f"💥 Критическая ошибка при запуске: {e}", exc_info=True)
         raise
     finally:
         try:
@@ -656,4 +739,9 @@ async def main_final():
             pass
 
 if __name__ == "__main__":
-    asyncio.run(main_final())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Бот завершил работу")
+    except Exception as e:
+        logger.error(f"💥 Фатальная ошибка: {e}", exc_info=True)
