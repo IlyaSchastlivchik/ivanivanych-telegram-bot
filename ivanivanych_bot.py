@@ -74,47 +74,74 @@ def escape_markdown_v2(text: str) -> str:
     
     return text
 
-def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
+def split_message_smart(text: str, max_length: int = 3000) -> List[str]:
     """
-    Умное разбиение сообщения на части с сохранением структуры.
-    3500 вместо 4096, так как при экранировании текст становится длиннее.
+    Умное разбиение сообщения на части.
+    3000 символов для учёта возможного увеличения при экранировании.
     """
     if len(text) <= max_length:
         return [text]
     
     parts = []
     
-    # Пытаемся разбить по абзацам
-    paragraphs = text.split('\n\n')
+    # Разбиваем по логическим блокам: сначала по двойным переводам строк
+    blocks = text.split('\n\n')
     current_part = ""
     
-    for para in paragraphs:
-        # Проверяем, не превысит ли добавление параграфа лимит
-        if len(current_part) + len(para) + 2 <= max_length:
-            current_part += para + "\n\n"
+    for block in blocks:
+        # Если блок сам по себе слишком длинный, разбиваем его дальше
+        if len(block) > max_length:
+            # Разбиваем блок по одиночным переводам строк
+            sub_blocks = block.split('\n')
+            sub_current = ""
+            
+            for sub_block in sub_blocks:
+                if len(sub_current) + len(sub_block) + 1 <= max_length:
+                    sub_current += sub_block + "\n"
+                else:
+                    if sub_current:
+                        parts.append(sub_current.strip())
+                    # Если подблок сам слишком длинный, разбиваем по словам
+                    if len(sub_block) > max_length:
+                        words = sub_block.split(' ')
+                        word_current = ""
+                        
+                        for word in words:
+                            if len(word_current) + len(word) + 1 <= max_length:
+                                word_current += word + " "
+                            else:
+                                if word_current:
+                                    parts.append(word_current.strip())
+                                word_current = word + " "
+                        
+                        if word_current:
+                            sub_current = word_current + "\n"
+                    else:
+                        sub_current = sub_block + "\n"
+            
+            if sub_current:
+                current_part += sub_current + "\n\n"
+        elif len(current_part) + len(block) + 2 <= max_length:
+            current_part += block + "\n\n"
         else:
             if current_part:
                 parts.append(current_part.strip())
-            # Если один параграф слишком длинный, разбиваем его по строкам
-            if len(para) > max_length:
-                lines = para.split('\n')
-                current_lines = ""
-                for line in lines:
-                    if len(current_lines) + len(line) + 1 <= max_length:
-                        current_lines += line + "\n"
-                    else:
-                        if current_lines:
-                            parts.append(current_lines.strip())
-                        current_lines = line + "\n"
-                if current_lines:
-                    current_part = current_lines.strip() + "\n\n"
-            else:
-                current_part = para + "\n\n"
+            current_part = block + "\n\n"
     
     if current_part:
         parts.append(current_part.strip())
     
-    return parts
+    # Убедимся, что ни одна часть не превышает лимит
+    final_parts = []
+    for part in parts:
+        if len(part) > max_length:
+            # Экстренное разбиение по символам
+            for i in range(0, len(part), max_length):
+                final_parts.append(part[i:i+max_length])
+        else:
+            final_parts.append(part)
+    
+    return final_parts
 
 async def send_safe_message(chat_id: int, text: str, reply_to_message_id: int = None, 
                            parse_mode: str = "MarkdownV2") -> Optional[types.Message]:
@@ -175,16 +202,22 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
     """
     Отправка длинных сообщений с правильным разбиением на части.
     """
-    # Экранируем текст
+    original_length = len(text)
+    logger.info(f"📤 Подготовка сообщения длиной {original_length} символов...")
+    
+    # ВАЖНО: Экранируем ДО разбиения, чтобы точно знать финальную длину
     escaped_text = escape_markdown_v2(text)
+    escaped_length = len(escaped_text)
+    logger.info(f"📤 После экранирования: {escaped_length} символов (увеличилось на {escaped_length - original_length} символов)")
     
-    # Умное разбиение на части
+    # Разбиваем на части с учётом экранированного текста
     parts = split_message_smart(escaped_text, max_length=3500)
-    
-    logger.info(f"📤 Отправка сообщения из {len(parts)} частей...")
+    logger.info(f"📤 Разбито на {len(parts)} частей")
     
     for i, part in enumerate(parts):
+        logger.info(f"📤 Часть {i+1}/{len(parts)}: {len(part)} символов")
         max_attempts = 2
+        
         for attempt in range(max_attempts):
             try:
                 kwargs = {
@@ -197,10 +230,34 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
                     kwargs["reply_to_message_id"] = reply_to_message_id
                 
                 await bot.send_message(**kwargs)
+                logger.info(f"✅ Часть {i+1}/{len(parts)} отправлена успешно")
                 break  # Успешно отправили
                 
             except Exception as e:
-                logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка при отправке части {i+1}: {e}")
+                error_msg = str(e)
+                logger.error(f"❌ Попытка {attempt+1}/{max_attempts}: Ошибка при отправке части {i+1}: {error_msg}")
+                
+                # Проверяем, не ошибка ли это длины сообщения
+                if "message is too long" in error_msg.lower() or "400" in error_msg:
+                    logger.warning(f"⚠️ Часть {i+1} слишком длинная ({len(part)} символов), уменьшаем...")
+                    # Разбиваем эту часть ещё раз
+                    sub_parts = split_message_smart(part, max_length=3000)
+                    for j, sub_part in enumerate(sub_parts):
+                        try:
+                            sub_kwargs = {
+                                "chat_id": chat_id,
+                                "text": sub_part,
+                                "parse_mode": "MarkdownV2"
+                            }
+                            
+                            if i == 0 and j == 0 and reply_to_message_id:
+                                sub_kwargs["reply_to_message_id"] = reply_to_message_id
+                            
+                            await bot.send_message(**sub_kwargs)
+                            logger.info(f"✅ Подчасть {j+1}/{len(sub_parts)} части {i+1} отправлена")
+                        except Exception as sub_e:
+                            logger.error(f"❌ Ошибка отправки подчасти: {sub_e}")
+                    break  # Выходим из цикла попыток для этой части
                 
                 if attempt == max_attempts - 1:  # Последняя попытка
                     # Фоллбэк без форматирования
@@ -209,9 +266,14 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
                         plain_text = part.replace('\\\\', '\\')
                         plain_text = re.sub(r'\\([_*\[\]()~`>#+\-=|{}.!])', r'\1', plain_text)
                         
+                        # Укоротим для plain text
+                        max_plain_length = 4000  # Telegram позволяет 4096 символов без форматирования
+                        if len(plain_text) > max_plain_length:
+                            plain_text = plain_text[:max_plain_length] + "\n\n[сообщение обрезано]"
+                        
                         plain_kwargs = {
                             "chat_id": chat_id,
-                            "text": f"Часть {i+1}/{len(parts)}:\n\n{plain_text[:3000]}",
+                            "text": f"Часть {i+1}/{len(parts)}:\n\n{plain_text}",
                             "parse_mode": None
                         }
                         
@@ -219,6 +281,7 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
                             plain_kwargs["reply_to_message_id"] = reply_to_message_id
                         
                         await bot.send_message(**plain_kwargs)
+                        logger.info(f"✅ Часть {i+1}/{len(parts)} отправлена без форматирования")
                     except Exception as e2:
                         logger.error(f"❌ Не удалось отправить даже без форматирования: {e2}")
                 
@@ -235,7 +298,7 @@ SYSTEM_PROMPT_MAIN = {
         "Отвечай ясно, по делу, с технической точностью. "
         "НЕ используй Markdown разметку, LaTeX (\\( \\)) или специальные символы в ответах. "
         "Используй только обычный текст. "
-        "Длина ответа не должна превышать 1500 символов."
+        "Длина ответа не должна превышать 1200 символов."
     )
 }
 
@@ -246,7 +309,7 @@ SYSTEM_PROMPT_DEEPSEEK = {
         "предоставив глубокий анализ, конкретные детали и практические шаги. "
         "НЕ используй Markdown разметку, LaTeX (\\( \\)) или специальные символы в ответах. "
         "Используй только обычный текст. "
-        "Длина ответа не должна превышать 1500 символов. "
+        "Длина ответа не должна превышать 1200 символов. "
         "Будь максимально конкретным и техничным."
     )
 }
@@ -384,6 +447,7 @@ async def handle_question(message: types.Message):
         if llama_response:
             llama_time = time.time() - start_total_time
             logger.info(f"📤 Отправка ответа Llama (за {llama_time:.1f}с)...")
+            logger.info(f"📊 Длина ответа Llama: {len(llama_response)} символов")
             
             # БЕЗОПАСНОЕ редактирование статусного сообщения
             status_text = "✅ Llama ответил! Готовим анализ DeepSeek..."
@@ -402,6 +466,9 @@ async def handle_question(message: types.Message):
         # ШАГ 4: ПОТОМ ОТПРАВЛЯЕМ ОТВЕТ DEEPSEEK (ЕСЛИ ЕСТЬ)
         if deepseek_response and len(deepseek_response) > 50:
             logger.info("📤 Отправка ответа DeepSeek...")
+            logger.info(f"📊 Длина ответа DeepSeek: {len(deepseek_response)} символов")
+            logger.info(f"📊 Пример первых 200 символов DeepSeek: {deepseek_response[:200]}...")
+            
             await send_long_message(
                 chat_id=chat_id,
                 text=f"🔍 Глубокий анализ DeepSeek R1:\n\n{deepseek_response}",
