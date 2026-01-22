@@ -39,27 +39,26 @@ OPENROUTER_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 # ==================== МОДЕЛИ С УВЕЛИЧЕННЫМИ ТАЙМАУТАМИ ====================
 MODELS_CONFIG = {
     "main": {
-        "primary": "meta-llama/llama-3.3-70b-instruct:free",      # Мощная, но медленная
-        "backup": "qwen/qwen3-next-80b-a3b-instruct:free",        # Очень мощная, медленная
-        "fallback": "google/gemma-3-4b-it:free",                  # Быстрая
-        "emergency": "microsoft/phi-3.5-mini-instruct:free"       # Очень быстрая
+        "primary": "meta-llama/llama-3.3-70b-instruct:free",
+        "backup": "qwen/qwen-2.5-vl-7b-instruct:free",  # Замена для Gemma
+        "fallback": "qwen/qwen2.5-32b-instruct:free",
+        "emergency": "microsoft/phi-3.5-mini-instruct:free"
     },
     "deepseek": {
-        "primary": "deepseek/deepseek-r1-0528:free",              # Глубокая, медленная
-        "backup": "deepseek/deepseek-coder-33b-instruct:free",    # Для кода, средняя
-        "fallback": "qwen/qwen2.5-32b-instruct:free",             # Сбалансированная
-        "emergency": "google/gemma-3-4b-it:free"                  # Быстрая резервная
+        "primary": "deepseek/deepseek-r1-0528:free",
+        "backup": "qwen/qwen3-coder:free",  # Замена для Gemma
+        "fallback": "deepseek/deepseek-coder-33b-instruct:free",
+        "emergency": "qwen/qwen2.5-32b-instruct:free"
     }
 }
 
-# ВРЕМЕННО ИСПОЛЬЗУЕМ ТОЛЬКО БЕСПЛАТНЫЕ МОДЕЛИ
 logger.info("🔧 Режим: ТОЛЬКО БЕСПЛАТНЫЕ МОДЕЛИ с увеличенными таймаутами")
 
 # Таймауты для разных типов моделей (в секундах)
 MODEL_TIMEOUTS = {
-    "fast": 45,      # Быстрые модели: gemma, phi-3.5
-    "medium": 90,    # Средние: qwen2.5, deepseek-coder
-    "slow": 150      # Медленные: llama-70b, qwen3-80b, deepseek-r1
+    "fast": 45,      # Быстрые модели: phi-3.5, qwen-2.5-7b
+    "medium": 90,    # Средние: qwen2.5-32b, deepseek-coder
+    "slow": 150      # Медленные: llama-70b, deepseek-r1, qwen3-coder
 }
 
 # ==================== КОНФИГУРАЦИЯ ГЕНЕРАЦИИ ====================
@@ -69,6 +68,15 @@ GENERATION_CONFIG = {
     "top_p": 0.9,
     "frequency_penalty": 0.1,
     "presence_penalty": 0.05,
+}
+
+# Специальные настройки для DeepSeek R1
+DEEPSEEK_R1_CONFIG = {
+    "temperature": 0.7,
+    "max_tokens": 800,  # Уменьшено для избежания обрезания
+    "top_p": 0.85,
+    "frequency_penalty": 0.15,
+    "presence_penalty": 0.1,
 }
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
@@ -341,7 +349,6 @@ async def test_model_speed(model: str) -> float:
     
     try:
         start = time.time()
-        # Увеличиваем таймаут для тестирования
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(OPENROUTER_URL, headers=headers, json=data) as response:
@@ -359,15 +366,15 @@ def get_model_timeout(model: str) -> int:
     model_lower = model.lower()
     
     # Быстрые модели
-    if "gemma" in model_lower or "phi" in model_lower:
+    if "phi-3.5" in model_lower or "qwen-2.5-7b" in model_lower:
         return MODEL_TIMEOUTS["fast"]
     
     # Средние модели
-    elif "qwen2.5" in model_lower or "coder" in model_lower:
+    elif "qwen2.5-32b" in model_lower or "coder" in model_lower:
         return MODEL_TIMEOUTS["medium"]
     
     # Медленные/глубокие модели
-    elif "llama" in model_lower or "qwen3" in model_lower or "deepseek" in model_lower:
+    elif "llama" in model_lower or "deepseek-r1" in model_lower or "qwen3-coder" in model_lower:
         return MODEL_TIMEOUTS["slow"]
     
     # По умолчанию - средний таймаут
@@ -388,7 +395,7 @@ async def try_model_with_retry(
         "X-Title": "IvanIvanych Bot",
     }
     
-    # Тестируем все модели, а не только первые 3
+    # Тестируем все модели
     speeds = {}
     
     for model in model_list:
@@ -415,13 +422,19 @@ async def try_model_with_retry(
         
         for attempt in range(max_retries):
             try:
+                # Используем специальные настройки для DeepSeek R1
+                if "deepseek-r1" in best_model.lower():
+                    config = DEEPSEEK_R1_CONFIG
+                else:
+                    config = GENERATION_CONFIG
+                
                 data = {
                     "model": best_model,
                     "messages": [
                         system_prompt,
                         {"role": "user", "content": user_question}
                     ],
-                    **GENERATION_CONFIG
+                    **config
                 }
                 
                 timeout = aiohttp.ClientTimeout(total=model_timeout)
@@ -442,7 +455,9 @@ async def try_model_with_retry(
                             result = await response.json()
                             if 'choices' in result and result['choices']:
                                 text = result['choices'][0]['message'].get('content', '').strip()
-                                if text and len(text) > 10:  # Минимальная длина ответа
+                                
+                                # Улучшенная проверка ответа
+                                if text and len(text) > 20 and not text.isspace():  # Минимальная длина и не только пробелы
                                     # Проверяем блоки кода
                                     backtick_count = text.count('`')
                                     if backtick_count % 2 != 0:
@@ -453,23 +468,24 @@ async def try_model_with_retry(
                                     logger.info(f"✅ {best_model.split('/')[-1]} ответил за {elapsed:.1f}с, {len(text)} символов, блоков кода: {code_blocks}")
                                     return text, best_model, code_blocks
                                 else:
-                                    logger.warning(f"⚠️ {best_model.split('/')[-1]} вернул слишком короткий ответ: {len(text)} символов")
+                                    logger.warning(f"⚠️ {best_model.split('/')[-1]} вернул некорректный ответ: {len(text)} символов")
                         else:
                             error_text = await response.text()
                             logger.warning(f"⚠️ {best_model.split('/')[-1]} ошибка [{response.status}]: {error_text[:200]}")
                     
                     if attempt < max_retries - 1:
-                        logger.info(f"🔄 Повторная попытка через 1 секунду...")
-                        await asyncio.sleep(1)
+                        wait_time = 1.5 * (attempt + 1)  # Увеличиваем время ожидания с каждой попыткой
+                        logger.info(f"🔄 Повторная попытка через {wait_time} секунд...")
+                        await asyncio.sleep(wait_time)
                         
             except asyncio.TimeoutError:
                 logger.warning(f"⏱️ Таймаут {best_model.split('/')[-1]} (> {model_timeout}с)")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.5)
             except aiohttp.ClientError as e:
                 logger.warning(f"🌐 Сетевая ошибка {best_model.split('/')[-1]}: {e}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(1.5)
             except Exception as e:
                 logger.error(f"❌ Неизвестная ошибка {best_model.split('/')[-1]}: {e}")
                 break
@@ -607,14 +623,16 @@ async def cmd_start(message: types.Message):
     welcome = (
         "👋 Привет! Я Иван Иваныч — бот с продвинутыми ИИ-моделями\n\n"
         "🚀 **Новые мощные модели:**\n"
-        "• **Qwen3 Next 80B** — самая мощная бесплатная модель\n"
-        "• **Gemma 3 4B** — быстрая и эффективная\n"
-        "• **DeepSeek R1** — глубокая аналитика\n\n"
+        "• **Llama 3.3 70B** — мощная аналитическая модель\n"
+        "• **DeepSeek R1** — глубокая аналитика с рассуждениями\n"
+        "• **Qwen3 Coder** — для программирования и кода\n"
+        "• **Qwen 2.5 7B** — быстрая и эффективная\n\n"
         "🤖 **Особенности:**\n"
         "• Работающая подсветка кода в Telegram\n"
         "• Увеличенные таймауты для глубоких моделей\n"
         "• Параллельная генерация от двух ИИ\n"
-        "• Статистика ответов и времени\n\n"
+        "• Статистика ответов и времени\n"
+        "• Улучшенная обработка блоков кода\n\n"
         "⚡ **Пример кода с подсветкой:**\n"
         "```python\nprint('Привет, мир!')\n```\n\n"
         "❓ Просто задайте вопрос с '?' в конце"
@@ -646,6 +664,7 @@ async def cmd_status(message: types.Message):
             status_report += f"{emoji} `{name_short}`{time_info}\n"
         
         status_report += f"\n⏱️ **Таймауты:** Быстрые: {MODEL_TIMEOUTS['fast']}с, Средние: {MODEL_TIMEOUTS['medium']}с, Глубокие: {MODEL_TIMEOUTS['slow']}с"
+        status_report += f"\n🔧 **DeepSeek R1:** уменьшен max_tokens до 800 для избежания обрезания"
         
         if status_msg:
             await status_msg.edit_text(status_report, parse_mode="MarkdownV2")
@@ -685,6 +704,13 @@ async def handle_question(message: types.Message):
         
         elapsed = time.time() - start_time
         
+        # Формируем список использованных моделей
+        models_used = []
+        if main_model and main_model != "local_fallback":
+            models_used.append(main_model.split('/')[-1])
+        if deepseek_model and deepseek_model != "local_fallback":
+            models_used.append(deepseek_model.split('/')[-1])
+        
         if main_response:
             logger.info(f"📤 Отправка основного ответа ({len(main_response)} символов)")
             
@@ -722,9 +748,8 @@ async def handle_question(message: types.Message):
                 if total_code_blocks > 0:
                     completion_text += f"\n💻 Код: {total_code_blocks} блок(ов)"
                 
-                if main_model and main_model != "local_fallback":
-                    model_name = main_model.split('/')[-1]
-                    completion_text += f"\n🤖 Модели: {model_name}"
+                if models_used:
+                    completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
                     
             else:
                 completion_text = (
@@ -735,9 +760,12 @@ async def handle_question(message: types.Message):
                 
                 if deepseek_code_blocks > 0:
                     completion_text += f"\n💻 Код: {deepseek_code_blocks} блок(ов)"
+                
+                if models_used:
+                    completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Успешно! Время: {elapsed:.1f}с")
+            logger.info(f"✅ Успешно! Время: {elapsed:.1f}с, модели: {', '.join(models_used) if models_used else 'local_fallback'}")
             
         elif main_response:
             completion_text = (
@@ -749,12 +777,11 @@ async def handle_question(message: types.Message):
             if main_code_blocks > 0:
                 completion_text += f"\n💻 Код: {main_code_blocks} блок(ов)"
             
-            if main_model and main_model != "local_fallback":
-                model_name = main_model.split('/')[-1]
-                completion_text += f"\n🤖 Модель: {model_name}"
+            if models_used:
+                completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Основной ответ за {elapsed:.1f}с")
+            logger.info(f"✅ Основной ответ за {elapsed:.1f}с, модель: {models_used[0] if models_used else 'local_fallback'}")
             
         else:
             fallback_response = get_local_fallback_response(user_question)
@@ -792,7 +819,7 @@ async def handle_question(message: types.Message):
 async def main():
     """Основная функция запуска"""
     logger.info("=" * 60)
-    logger.info("🚀 Бот IvanIvanych запускается с УВЕЛИЧЕННЫМИ ТАЙМАУТАМИ...")
+    logger.info("🚀 Бот IvanIvanych запускается с улучшенными настройками...")
     logger.info("🤖 ОСНОВНЫЕ МОДЕЛИ:")
     logger.info(f"  • {MODELS_CONFIG['main']['primary']}")
     logger.info(f"  • {MODELS_CONFIG['main']['backup']}")
@@ -803,6 +830,9 @@ async def main():
     logger.info(f"  • Быстрые модели: {MODEL_TIMEOUTS['fast']}с")
     logger.info(f"  • Средние модели: {MODEL_TIMEOUTS['medium']}с")
     logger.info(f"  • Глубокие модели: {MODEL_TIMEOUTS['slow']}с")
+    logger.info("🔧 СПЕЦИАЛЬНЫЕ НАСТРОЙКИ:")
+    logger.info("  • DeepSeek R1: max_tokens уменьшен до 800")
+    logger.info("  • Убраны Gemma модели из-за ошибок API")
     logger.info("=" * 60)
     
     try:
