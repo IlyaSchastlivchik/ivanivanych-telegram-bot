@@ -113,150 +113,82 @@ def clean_text(text: str) -> str:
     
     return text
 
-# ==================== ОБРАБОТКА ФОРМУЛ (LaTeX → Unicode) ====================
-def convert_latex_to_unicode(latex_formula: str) -> str:
-    """
-    Конвертирует LaTeX формулы в Unicode-представление для Telegram.
-    Это приблизительное представление, но читаемое.
-    """
-    # Упрощенные замены для основных математических символов
-    replacements = [
-        (r'\\cdot', '·'),
-        (r'\\times', '×'),
-        (r'\\div', '÷'),
-        (r'\\pm', '±'),
-        (r'\\mp', '∓'),
-        (r'\\leq', '≤'),
-        (r'\\geq', '≥'),
-        (r'\\neq', '≠'),
-        (r'\\approx', '≈'),
-        (r'\\infty', '∞'),
-        (r'\\pi', 'π'),
-        (r'\\alpha', 'α'),
-        (r'\\beta', 'β'),
-        (r'\\gamma', 'γ'),
-        (r'\\delta', 'δ'),
-        (r'\\epsilon', 'ε'),
-        (r'\\theta', 'θ'),
-        (r'\\lambda', 'λ'),
-        (r'\\mu', 'μ'),
-        (r'\\sigma', 'σ'),
-        (r'\\omega', 'ω'),
-        (r'\\sum', 'Σ'),
-        (r'\\int', '∫'),
-        (r'\\oint', '∮'),
-        (r'\\nabla', '∇'),
-        (r'\\partial', '∂'),
-        (r'\\sqrt', '√'),
-        (r'\\frac{(.*?)}{(.*?)}', r'\1/\2'),  # Простые дроби
-        (r'\^\{([^}]+)\}', r'^\1'),  # Верхние индексы без скобок
-        (r'_\{([^}]+)\}', r'_\1'),  # Нижние индексы без скобок
-        (r'\\vec\{([^}]+)\}', r'\1⃗'),  # Векторы
-        (r'\\overline\{([^}]+)\}', r'\1̄'),  # Черта сверху
-        (r'\\text\{([^}]+)\}', r'\1'),  # Текст
-        (r'\\left\(', '('),
-        (r'\\right\)', ')'),
-        (r'\\left\[', '['),
-        (r'\\right\]', ']'),
-        (r'\\ ', ' '),
-        (r'\\,', ' '),
-        (r'\\quad', '  '),
-        (r'\\qquad', '    '),
-        (r'\\;', ' '),
-        (r'\\(?:sin|cos|tan|log|ln|exp)', lambda m: m.group(0)[1:]),  # Функции без обратного слэша
-    ]
+def prepare_html_message(text: str) -> str:
+    """Подготовка HTML сообщения с корректной обработкой кода"""
+    text = clean_text(text)
     
-    result = latex_formula
+    # Экранируем HTML символы во всем тексте
+    text = html.escape(text)
     
-    for pattern, replacement in replacements:
-        if callable(replacement):
-            result = re.sub(pattern, replacement, result)
+    # Восстанавливаем блоки кода (отменяем экранирование внутри них)
+    def restore_code_block(match):
+        language = match.group(1) if match.group(1) else ''
+        code_content = match.group(2)
+        # Отменяем экранирование внутри кода
+        code_content = code_content.replace('&lt;', '<').replace('&gt;', '>')
+        code_content = code_content.replace('&amp;', '&').replace('&quot;', '"')
+        code_content = code_content.replace('&#x27;', "'")
+        code_content = code_content.replace('&#x2F;', '/')
+        
+        if language:
+            return f'<pre><code class="language-{language}">{code_content}</code></pre>'
         else:
-            result = result.replace(pattern, replacement)
+            return f'<pre><code>{code_content}</code></pre>'
     
-    # Убираем лишние пробелы и упрощаем
-    result = re.sub(r'\s+', ' ', result).strip()
+    # Обрабатываем блоки кода с тройными кавычками
+    text = re.sub(r'```(\w*)\n([\s\S]*?)\n```', restore_code_block, text)
     
-    return result
-
-def format_formula_for_telegram(latex_formula: str, is_inline: bool = False) -> str:
-    """
-    Форматирует формулу для Telegram с использованием MarkdownV2
-    """
-    # Упрощаем LaTeX до Unicode
-    unicode_formula = convert_latex_to_unicode(latex_formula)
+    # Обрабатываем inline код
+    def restore_inline_code(match):
+        code_content = match.group(1)
+        # Отменяем экранирование внутри inline кода
+        code_content = code_content.replace('&lt;', '<').replace('&gt;', '>')
+        code_content = code_content.replace('&amp;', '&').replace('&quot;', '"')
+        code_content = code_content.replace('&#x27;', "'")
+        code_content = code_content.replace('&#x2F;', '/')
+        return f'<code>{code_content}</code>'
     
-    if is_inline:
-        # Для inline формул используем моноширинный шрифт
-        return f'`{unicode_formula}`'
-    else:
-        # Для блочных формул используем блок кода
-        return f'```\n{unicode_formula}\n```'
-
-def process_formulas_in_text(text: str) -> str:
-    """
-    Новая обработка формул: преобразование LaTeX в читаемый Unicode + MarkdownV2
-    """
-    # Защищаем блоки кода от обработки
-    code_blocks = []
-    def save_code_block(match):
-        code_blocks.append(match.group(0))
-        return f"__CODE_BLOCK_{len(code_blocks)-1}__"
+    text = re.sub(r'`(.*?)`', restore_inline_code, text)
     
-    text = re.sub(r'```[\s\S]*?```', save_code_block, text)
+    # Убираем теги [f] для HTML, оставляем содержимое
+    def replace_formula_html(match):
+        formula = match.group(1)
+        # Убираем экранирование из формулы для читаемости
+        formula = formula.replace('&lt;', '<').replace('&gt;', '>')
+        formula = formula.replace('&amp;', '&')
+        return f'<i>{formula}</i>'
     
-    # Обрабатываем формулы в тегах [f]
-    def replace_formula(match):
-        latex_content = match.group(1).strip()
-        
-        # Определяем, inline или блочная формула
-        # Если содержит \displaystyle, \sum, \int, \frac - считаем блочной
-        is_inline = not any(pattern in latex_content for pattern in [
-            '\\displaystyle', '\\sum', '\\int', '\\begin', '\\frac{', '\\lim'
-        ])
-        
-        # Форматируем для Telegram
-        formatted = format_formula_for_telegram(latex_content, is_inline)
-        
-        # Для сложных формул добавляем примечание
-        if not is_inline and len(latex_content) > 50:
-            formatted += f"\n\n*Для точного отображения скопируйте LaTeX:*\n`{latex_content}`"
-        
-        return formatted
-    
-    # Заменяем [f]...[/f] на форматированный текст
-    pattern = r'\[f\](.*?)\[/f\]'
-    text = re.sub(pattern, replace_formula, text, flags=re.DOTALL)
-    
-    # Восстанавливаем блоки кода
-    for i, code_block in enumerate(code_blocks):
-        text = text.replace(f'__CODE_BLOCK_{i}__', code_block)
+    text = re.sub(r'\[f\](.*?)\[/f\]', replace_formula_html, text)
     
     return text
 
-def prepare_markdown_message_with_formulas(text: str) -> str:
-    """Подготовка Markdown сообщения с поддержкой формул"""
+def prepare_markdown_message(text: str) -> str:
+    """Подготовка Markdown сообщения - простая и надежная версия"""
     text = clean_text(text)
     
-    # Обрабатываем формулы
-    text = process_formulas_in_text(text)
-    
-    # Сначала защищаем блоки кода (включая те, что получились из формул)
+    # Сначала защищаем блоки кода
     code_blocks = []
     def save_code_block(match):
         code_blocks.append(match.group(0))
         return f"__CODE_BLOCK_{len(code_blocks)-1}__"
     
-    # Захватываем блоки кода с тройными кавычками
     text = re.sub(r'```[\s\S]*?```', save_code_block, text)
     
-    # Теперь защищаем inline код (одинарные кавычки)
+    # Теперь защищаем inline код
     inline_codes = []
     def save_inline_code(match):
         inline_codes.append(match.group(0))
         return f"__INLINE_CODE_{len(inline_codes)-1}__"
     
     text = re.sub(r'`[^`\n]+`', save_inline_code, text)
+    
+    # Защищаем формулы в тегах [f]
+    formula_blocks = []
+    def save_formula_block(match):
+        formula_blocks.append(match.group(0))
+        return f"__FORMULA_BLOCK_{len(formula_blocks)-1}__"
+    
+    text = re.sub(r'\[f\](.*?)\[/f\]', save_formula_block, text)
     
     # Экранируем специальные символы MarkdownV2
     chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
@@ -272,34 +204,77 @@ def prepare_markdown_message_with_formulas(text: str) -> str:
     for i, code_block in enumerate(code_blocks):
         text = text.replace(f'__CODE_BLOCK_{i}__', code_block)
     
-    return text
-
-def prepare_html_message(text: str) -> str:
-    """Подготовка HTML сообщения - fallback вариант"""
-    text = clean_text(text)
-    
-    # Простая обработка кода для HTML
-    def restore_code_simple(match):
-        code_content = match.group(2)
-        return f'<pre><code>{code_content}</code></pre>'
-    
-    text = re.sub(r'```(\w*)\n([\s\S]*?)\n```', restore_code_simple, text)
-    
-    # Убираем теги [f], оставляем только содержимое
-    text = re.sub(r'\[f\](.*?)\[/f\]', r'<i>\1</i>', text)
-    
-    # Экранируем HTML
-    text = html.escape(text)
-    
-    # Восстанавливаем теги кода после экранирования
-    text = text.replace('&lt;pre&gt;&lt;code&gt;', '<pre><code>')
-    text = text.replace('&lt;/code&gt;&lt;/pre&gt;', '</code></pre>')
+    # Восстанавливаем формулы, но оставляем их в тегах для читаемости
+    for i, formula_block in enumerate(formula_blocks):
+        text = text.replace(f'__FORMULA_BLOCK_{i}__', formula_block)
     
     return text
 
 def has_code_blocks(text: str) -> bool:
     """Проверяет, содержит ли текст блоки кода"""
     return '```' in text
+
+async def send_message_safe(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
+    """Умная отправка сообщений с автоматическим выбором формата"""
+    try:
+        # Сначала пробуем HTML (лучше для кода)
+        html_text = prepare_html_message(text)
+        
+        kwargs = {
+            "chat_id": chat_id,
+            "text": html_text,
+            "parse_mode": "HTML"
+        }
+        if reply_to_message_id:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        
+        result = await bot.send_message(**kwargs)
+        logger.info(f"✅ Сообщение отправлено с HTML, длина: {len(text)} символов")
+        return result
+        
+    except Exception as e:
+        logger.warning(f"⚠️ HTML не сработал: {e}, пробую MarkdownV2...")
+        
+        try:
+            # Пробуем MarkdownV2
+            markdown_text = prepare_markdown_message(text)
+            
+            kwargs = {
+                "chat_id": chat_id,
+                "text": markdown_text,
+                "parse_mode": "MarkdownV2"
+            }
+            if reply_to_message_id:
+                kwargs["reply_to_message_id"] = reply_to_message_id
+            
+            result = await bot.send_message(**kwargs)
+            logger.info(f"✅ Сообщение отправлено с MarkdownV2, длина: {len(text)} символов")
+            return result
+            
+        except Exception as e2:
+            logger.warning(f"⚠️ MarkdownV2 не сработал: {e2}, пробую без форматирования...")
+            
+            try:
+                # Отправляем без форматирования
+                cleaned_text = clean_text(text)
+                # Убираем теги [f] для чистого текста
+                cleaned_text = re.sub(r'\[f\](.*?)\[/f\]', r'\1', cleaned_text)
+                
+                kwargs = {
+                    "chat_id": chat_id,
+                    "text": cleaned_text,
+                    "parse_mode": None
+                }
+                if reply_to_message_id:
+                    kwargs["reply_to_message_id"] = reply_to_message_id
+                
+                result = await bot.send_message(**kwargs)
+                logger.info("✅ Сообщение отправлено без форматирования")
+                return result
+                
+            except Exception as e3:
+                logger.error(f"❌ Не удалось отправить сообщение: {e3}")
+                return None
 
 def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
     """Умное разбиение сообщений с сохранением блоков кода"""
@@ -363,76 +338,8 @@ def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
     
     return restored_parts
 
-async def send_message_safe(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
-    """Умная отправка сообщений с поддержкой формул"""
-    try:
-        # Сначала пробуем MarkdownV2 с поддержкой формул
-        markdown_text = prepare_markdown_message_with_formulas(text)
-        
-        kwargs = {
-            "chat_id": chat_id,
-            "text": markdown_text,
-            "parse_mode": "MarkdownV2"
-        }
-        if reply_to_message_id:
-            kwargs["reply_to_message_id"] = reply_to_message_id
-        
-        result = await bot.send_message(**kwargs)
-        logger.info(f"✅ Сообщение отправлено с MarkdownV2+формулами, длина: {len(text)} символов")
-        return result
-        
-    except Exception as e:
-        logger.warning(f"⚠️ MarkdownV2 с формулами не сработал: {e}, пробую HTML...")
-        
-        try:
-            # Fallback: HTML без формул
-            html_text = prepare_html_message(text)
-            
-            kwargs = {
-                "chat_id": chat_id,
-                "text": html_text,
-                "parse_mode": "HTML"
-            }
-            if reply_to_message_id:
-                kwargs["reply_to_message_id"] = reply_to_message_id
-            
-            result = await bot.send_message(**kwargs)
-            logger.info(f"✅ Сообщение отправлено с HTML, длина: {len(text)} символов")
-            return result
-            
-        except Exception as e2:
-            logger.warning(f"⚠️ HTML не сработал: {e2}, пробую без форматирования...")
-            
-            try:
-                # Отправляем без форматирования, но с обработкой формул
-                cleaned_text = clean_text(text)
-                
-                # Простая замена тегов [f] на читаемый вид
-                def replace_formula_simple(match):
-                    latex_content = match.group(1)
-                    unicode_formula = convert_latex_to_unicode(latex_content)
-                    return f" [Формула: {unicode_formula}] "
-                
-                cleaned_text = re.sub(r'\[f\](.*?)\[/f\]', replace_formula_simple, cleaned_text)
-                
-                kwargs = {
-                    "chat_id": chat_id,
-                    "text": cleaned_text,
-                    "parse_mode": None
-                }
-                if reply_to_message_id:
-                    kwargs["reply_to_message_id"] = reply_to_message_id
-                
-                result = await bot.send_message(**kwargs)
-                logger.info("✅ Сообщение отправлено без форматирования")
-                return result
-                
-            except Exception as e3:
-                logger.error(f"❌ Не удалось отправить сообщение: {e3}")
-                return None
-
 async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
-    """Отправка длинных сообщений с поддержкой формул"""
+    """Отправка длинных сообщений"""
     original_length = len(text)
     logger.info(f"📤 Подготовка сообщения длиной {original_length} символов...")
     
@@ -445,12 +352,8 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
         
         # Проверяем наличие кода в части
         has_code = has_code_blocks(part)
-        has_formulas = '[f]' in part
-        
         if has_code:
             logger.info(f"📤 Часть {i+1} содержит код")
-        if has_formulas:
-            logger.info(f"📤 Часть {i+1} содержит формулы")
         
         message = await send_message_safe(
             chat_id=chat_id,
@@ -513,7 +416,7 @@ async def try_model_with_retry(
     system_prompt: Dict[str, str],
     max_retries: int = 2
 ) -> Tuple[Optional[str], Optional[str], int]:
-    """Попытка использовать модель с поддержкой формул"""
+    """Попытка использовать модель с приоритетом для Llama"""
     
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -522,7 +425,7 @@ async def try_model_with_retry(
         "X-Title": "IvanIvanych Bot",
     }
     
-    # Тестируем модели
+    # Тестируем модели, но сохраняем порядок приоритета
     available_models = []
     
     for model in model_list:
@@ -533,17 +436,19 @@ async def try_model_with_retry(
         else:
             logger.warning(f"  • {model.split('/')[-1]}: недоступна")
     
+    # Если нет доступных моделей, используем список как есть
     if not available_models:
         logger.warning("⚠️ Ни одна модель не доступна, использую все по порядку")
         available_models = model_list
     
-    # Пробуем модели в порядке приоритета
+    # Пробуем модели в порядке приоритета (без сортировки по скорости)
     for model in available_models:
         model_timeout = get_model_timeout(model)
         logger.info(f"🎯 Пробую модель: {model.split('/')[-1]} (таймаут: {model_timeout}с)")
         
         for attempt in range(max_retries):
             try:
+                # Специальные настройки для DeepSeek R1
                 if "deepseek-r1" in model.lower():
                     config = DEEPSEEK_R1_CONFIG
                 else:
@@ -582,8 +487,10 @@ async def try_model_with_retry(
                                     backtick_count = text.count('`')
                                     if backtick_count % 2 != 0:
                                         logger.warning(f"⚠️ Нечётное количество кавычек: {backtick_count}")
+                                        # Пробуем найти незакрытый блок и закрыть его
                                         if '```' in text:
                                             last_open = text.rfind('```')
+                                            # Если после последнего открытия нет закрытия
                                             if text[last_open:].count('```') == 1:
                                                 text += '\n```'
                                             else:
@@ -598,17 +505,21 @@ async def try_model_with_retry(
                                         if open_tags > close_tags:
                                             for _ in range(open_tags - close_tags):
                                                 text += '[/f]'
+                                        else:
+                                            # Если закрывающих больше, добавляем открывающие в начало
+                                            text = '[f]' * (close_tags - open_tags) + text
                                     
-                                    # Для DeepSeek R1 добавляем предупреждение об обрезке
+                                    # Для DeepSeek R1 добавляем мягкое предупреждение, если ответ обрезан
                                     if "deepseek-r1" in model.lower() and len(text) > 700:
+                                        # Проверяем признаки обрезания
                                         if text.endswith(('...', '—', '-', ':', ';', ',')) or \
                                            ('```' in text and text.count('```') % 2 != 0):
                                             if not any(marker in text for marker in ['[ответ обрезан]', '[обрезка]']):
+                                                # Добавляем мягкое пояснение в конце
                                                 text += '\n\n<i>Примечание: ответ может быть обрезан из-за ограничений бесплатной модели</i>'
                                     
                                     code_blocks = len(re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', text))
                                     formula_blocks = len(re.findall(r'\[f\].*?\[/f\]', text))
-                                    
                                     logger.info(f"✅ {model.split('/')[-1]} ответил за {elapsed:.1f}с, {len(text)} символов, код: {code_blocks}, формулы: {formula_blocks}")
                                     return text, model, code_blocks
                                 else:
@@ -657,7 +568,6 @@ LOCAL_RESPONSES = {
     "общий": [
         "🧠 **Анализ запроса**\n\n"
         "Для распознавания текста и формул в Telegram группе:\n\n"
-        "[f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]\n\n"
         "**Этапы внедрения:**\n"
         "1. **Подготовка инфраструктуры**\n"
         "   - Сервер/VPS с Python 3.8+\n"
@@ -694,7 +604,7 @@ def get_local_fallback_response(user_question: str) -> str:
     return random.choice(responses)
 
 async def get_ai_response(user_question: str, response_type: str = "main") -> Tuple[Optional[str], Optional[str], int]:
-    """Получает ответ от AI с поддержкой формул"""
+    """Получает ответ от AI"""
     if response_type == "main":
         models = [
             MODELS_CONFIG["main"]["primary"],
@@ -706,14 +616,12 @@ async def get_ai_response(user_question: str, response_type: str = "main") -> Tu
             "role": "system",
             "content": (
                 "Ты Иван Иваныч — эксперт в технологиях и футуристике. "
-                "Отвечай ясно и по делу. Используй Markdown для форматирования.\n\n"
-                "**ВАЖНО ДЛЯ ФОРМУЛ:**\n"
-                "1. ВСЕ математические формулы оборачивай в теги [f] и [/f]\n"
-                "2. Пример: [f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]\n"
-                "3. Для кода используй тройные кавычки с указанием языка.\n"
-                "4. Всегда закрывай блок кода и теги [f].\n"
-                "5. Пиши формулы в LaTeX, но старайся использовать простой синтаксис.\n"
-                "6. Избегай сложных LaTeX конструкций, если можно упростить.\n\n"
+                "Отвечай ясно и по делу. Используй Markdown для форматирования. "
+                "Для кода используй тройные кавычки с указанием языка. "
+                "Всегда закрывай блок кода. "
+                "Для математических формул используй LaTeX и оборачивай их в теги [f] и [/f]. "
+                "Пример: [f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]. "
+                "Не используй Markdown для форматирования формул. "
                 "Держи ответ в 800-1500 символов."
             )
         }
@@ -727,16 +635,14 @@ async def get_ai_response(user_question: str, response_type: str = "main") -> Tu
         system_prompt = {
             "role": "system",
             "content": (
-                "Ты технический аналитик. Дай глубокий анализ с практическими шагами.\n\n"
-                "**ВАЖНО ДЛЯ ФОРМУЛ:**\n"
-                "1. ВСЕ математические выражения оборачивай в теги [f] и [/f]\n"
-                "2. Пример правильного использования:\n"
-                "   - Формула работы: [f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]\n"
-                "   - Интеграл: [f]\\int_{a}^{b} f(x) dx[/f]\n"
-                "3. Для кода используй тройные кавычки с языком.\n"
-                "4. Всегда проверяй баланс тегов.\n"
-                "5. Используй простой LaTeX синтаксис для лучшей читаемости.\n\n"
-                "Будь конкретным и техничным. Отвечай развернуто (1000-1800 символов)."
+                "Ты технический аналитик. Дай глубокий анализ с практическими шагами. "
+                "Используй Markdown, для кода — тройные кавычки с языком. "
+                "Для математических формул используй LaTeX и оборачивай их в теги [f] и [/f]. "
+                "Пример: [f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]. "
+                "Всегда закрывай блоки кода. "
+                "Всегда закрывай теги [f]. "
+                "Будь конкретным и техничным. "
+                "Отвечай развернуто, но в рамках разумного (1000-1800 символов)."
             )
         }
     
@@ -778,15 +684,16 @@ async def cmd_start(message: types.Message):
         "• **Qwen3 Next 80B** — самая мощная бесплатная модель\n"
         "• **Gemma 3 4B** — быстрая и эффективная\n"
         "• **DeepSeek R1** — глубокая аналитика\n\n"
-        "🤖 **НОВИНКА: Поддержка формул в Unicode!**\n"
-        "• Интеллектуальное преобразование LaTeX → Unicode\n"
-        "• Формулы в моноширинном шрифте для читаемости\n"
-        "• Автоматическое экранирование MarkdownV2\n\n"
-        "⚡ **Примеры:**\n"
-        "• Простая формула: [f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]\n"
-        "• Сложная формула: [f]\\int_{a}^{b} f(x) dx[/f]\n"
-        "• Код с подсветкой:\n"
-        "```python\nprint('Привет, мир!')\n```\n\n"
+        "🤖 **Особенности:**\n"
+        "• Работающая подсветка кода в Telegram\n"
+        "• Поддержка математических формул в LaTeX\n"
+        "• Увеличенные таймауты для глубоких моделей\n"
+        "• Параллельная генерация от двух ИИ\n"
+        "• Статистика ответов и времени\n\n"
+        "⚡ **Пример кода с подсветкой:**\n"
+        "```python\nprint('Привет, мир!')\n```\n"
+        "🧮 **Пример формулы:**\n"
+        "[f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]\n\n"
         "❓ Просто задайте вопрос с '?' в конце"
     )
     await send_message_safe(message.chat.id, welcome, message.message_id)
@@ -817,20 +724,6 @@ async def cmd_status(message: types.Message):
         
         status_report += f"\n⏱️ **Таймауты:** Быстрые: {MODEL_TIMEOUTS['fast']}с, Средние: {MODEL_TIMEOUTS['medium']}с, Глубокие: {MODEL_TIMEOUTS['slow']}с"
         
-        # Проверяем сервис формул
-        status_report += "\n\n🧮 **Сервис формул:** "
-        
-        try:
-            # Тестируем преобразование формулы
-            test_formula = "x^2 + y^2 = z^2"
-            unicode_result = convert_latex_to_unicode(test_formula)
-            if unicode_result:
-                status_report += f"✅ Работает (пример: {unicode_result})"
-            else:
-                status_report += "⚠️ Проблемы с конвертацией"
-        except Exception as e:
-            status_report += f"❌ Ошибка: {str(e)[:50]}"
-        
         if status_msg:
             await status_msg.edit_text(status_report, parse_mode="HTML")
         else:
@@ -845,7 +738,7 @@ async def cmd_status(message: types.Message):
 
 @dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
 async def handle_question(message: types.Message):
-    """Обработка вопросов с поддержкой формул и кода"""
+    """Обработка вопросов с подсветкой кода"""
     user_question = message.text.strip()
     chat_id = message.chat.id
     
@@ -869,19 +762,19 @@ async def handle_question(message: types.Message):
         
         elapsed = time.time() - start_time
         
+        # Формируем список использованных моделей
         models_used = []
-        formula_counts = [0, 0]
-        
-        if main_response and main_model != "local_fallback":
+        if main_model and main_model != "local_fallback":
             models_used.append(main_model.split('/')[-1])
-            formula_counts[0] = len(re.findall(r'\[f\].*?\[/f\]', main_response))
-        
-        if deepseek_response and deepseek_model != "local_fallback":
+        if deepseek_model and deepseek_model != "local_fallback":
             models_used.append(deepseek_model.split('/')[-1])
-            formula_counts[1] = len(re.findall(r'\[f\].*?\[/f\]', deepseek_response))
+        
+        # Считаем формулы
+        main_formulas = len(re.findall(r'\[f\].*?\[/f\]', main_response)) if main_response else 0
+        deepseek_formulas = len(re.findall(r'\[f\].*?\[/f\]', deepseek_response)) if deepseek_response else 0
         
         if main_response:
-            logger.info(f"📤 Отправка основного ответа ({len(main_response)} символов, формул: {formula_counts[0]})")
+            logger.info(f"📤 Отправка основного ответа ({len(main_response)} символов, формул: {main_formulas})")
             
             await processing_msg.edit_text(
                 "✅ Первый ответ готов! Готовлю анализ...",
@@ -897,7 +790,7 @@ async def handle_question(message: types.Message):
             logger.warning("⚠️ Основной ответ не получен")
         
         if deepseek_response and len(deepseek_response) > 100:
-            logger.info(f"📤 Отправка аналитического ответа ({len(deepseek_response)} символов, формул: {formula_counts[1]})")
+            logger.info(f"📤 Отправка аналитического ответа ({len(deepseek_response)} символов, формул: {deepseek_formulas})")
             
             await send_long_message(
                 chat_id,
@@ -907,8 +800,7 @@ async def handle_question(message: types.Message):
             
             if main_response:
                 total_code_blocks = main_code_blocks + deepseek_code_blocks
-                total_formulas = formula_counts[0] + formula_counts[1]
-                
+                total_formulas = main_formulas + deepseek_formulas
                 completion_text = (
                     f"✅ Анализ завершён!\n"
                     f"⏱️ Общее время: {elapsed:.1f} секунд\n"
@@ -920,7 +812,7 @@ async def handle_question(message: types.Message):
                     completion_text += f"\n💻 Код: {total_code_blocks} блок(ов)"
                 
                 if total_formulas > 0:
-                    completion_text += f"\n🧮 Формулы: {total_formulas} сложных формул"
+                    completion_text += f"\n🧮 Формулы: {total_formulas}"
                 
                 if models_used:
                     completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
@@ -935,14 +827,14 @@ async def handle_question(message: types.Message):
                 if deepseek_code_blocks > 0:
                     completion_text += f"\n💻 Код: {deepseek_code_blocks} блок(ов)"
                 
-                if formula_counts[1] > 0:
-                    completion_text += f"\n🧮 Формулы: {formula_counts[1]} сложных формул"
+                if deepseek_formulas > 0:
+                    completion_text += f"\n🧮 Формулы: {deepseek_formulas}"
                 
                 if models_used:
                     completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Успешно! Время: {elapsed:.1f}с, формулы: {total_formulas if main_response else formula_counts[1]}")
+            logger.info(f"✅ Успешно! Время: {elapsed:.1f}с, модели: {', '.join(models_used) if models_used else 'local_fallback'}, формулы: {total_formulas if main_response else deepseek_formulas}")
             
         elif main_response:
             completion_text = (
@@ -954,14 +846,14 @@ async def handle_question(message: types.Message):
             if main_code_blocks > 0:
                 completion_text += f"\n💻 Код: {main_code_blocks} блок(ов)"
             
-            if formula_counts[0] > 0:
-                completion_text += f"\n🧮 Формулы: {formula_counts[0]} сложных формул"
+            if main_formulas > 0:
+                completion_text += f"\n🧮 Формулы: {main_formulas}"
             
             if models_used:
                 completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Основной ответ за {elapsed:.1f}с, формулы: {formula_counts[0]}")
+            logger.info(f"✅ Основной ответ за {elapsed:.1f}с, модель: {models_used[0] if models_used else 'local_fallback'}, формулы: {main_formulas}")
             
         else:
             fallback_response = get_local_fallback_response(user_question)
@@ -975,14 +867,13 @@ async def handle_question(message: types.Message):
             
             fallback_code_blocks = len(re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', fallback_response))
             fallback_formulas = len(re.findall(r'\[f\].*?\[/f\]', fallback_response))
-            
             completion_text = f"✅ Локальный ответ за {elapsed:.1f}с"
             
             if fallback_code_blocks > 0:
                 completion_text += f"\n💻 Код: {fallback_code_blocks} блок(ов)"
             
             if fallback_formulas > 0:
-                completion_text += f"\n🧮 Формулы: {fallback_formulas} сложных формул"
+                completion_text += f"\n🧮 Формулы: {fallback_formulas}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
         
@@ -1015,10 +906,6 @@ async def main():
     logger.info(f"  • Быстрые модели: {MODEL_TIMEOUTS['fast']}с")
     logger.info(f"  • Средние модели: {MODEL_TIMEOUTS['medium']}с")
     logger.info(f"  • Глубокие модели: {MODEL_TIMEOUTS['slow']}с")
-    logger.info("🧮 РЕНДЕРИНГ ФОРМУЛ:")
-    logger.info("  • LaTeX → Unicode преобразование")
-    logger.info("  • MarkdownV2 как основной режим")
-    logger.info("  • Селективная обработка через теги [f]")
     logger.info("=" * 60)
     
     try:
@@ -1042,6 +929,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Завершение работы")
+        logger.info("👋 Завернение работы")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка: {e}", exc_info=True)
