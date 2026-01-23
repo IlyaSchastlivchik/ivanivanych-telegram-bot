@@ -73,7 +73,7 @@ GENERATION_CONFIG = {
 
 DEEPSEEK_R1_CONFIG = {
     "temperature": 0.7,
-    "max_tokens": 800,
+    "max_tokens": 800,  # Уменьшено для избежания обрезания
     "top_p": 0.85,
     "frequency_penalty": 0.15,
     "presence_penalty": 0.1,
@@ -99,6 +99,7 @@ def clean_text(text: str) -> str:
         '\u200d', '\ufeff'
     ]
     
+    # Удаляем управляющие символы, но сохраняем переводы строк и табуляции
     cleaned = []
     for char in text:
         cat = unicodedata.category(char)
@@ -136,6 +137,7 @@ def prepare_html_message(text: str) -> str:
             return f'<pre><code>{code_content}</code></pre>'
     
     # Обрабатываем блоки кода с тройными кавычками
+    # Используем DOTALL для захвата многострочного кода
     text = re.sub(r'```(\w*)\n([\s\S]*?)\n```', restore_code_block, text)
     
     # Обрабатываем inline код
@@ -150,16 +152,6 @@ def prepare_html_message(text: str) -> str:
     
     text = re.sub(r'`(.*?)`', restore_inline_code, text)
     
-    # Убираем теги [f] для HTML, оставляем содержимое
-    def replace_formula_html(match):
-        formula = match.group(1)
-        # Убираем экранирование из формулы для читаемости
-        formula = formula.replace('&lt;', '<').replace('&gt;', '>')
-        formula = formula.replace('&amp;', '&')
-        return f'<i>{formula}</i>'
-    
-    text = re.sub(r'\[f\](.*?)\[/f\]', replace_formula_html, text)
-    
     return text
 
 def prepare_markdown_message(text: str) -> str:
@@ -172,6 +164,7 @@ def prepare_markdown_message(text: str) -> str:
         code_blocks.append(match.group(0))
         return f"__CODE_BLOCK_{len(code_blocks)-1}__"
     
+    # Заменяем блоки кода на плейсхолдеры
     text = re.sub(r'```[\s\S]*?```', save_code_block, text)
     
     # Теперь защищаем inline код
@@ -181,14 +174,6 @@ def prepare_markdown_message(text: str) -> str:
         return f"__INLINE_CODE_{len(inline_codes)-1}__"
     
     text = re.sub(r'`[^`\n]+`', save_inline_code, text)
-    
-    # Защищаем формулы в тегах [f]
-    formula_blocks = []
-    def save_formula_block(match):
-        formula_blocks.append(match.group(0))
-        return f"__FORMULA_BLOCK_{len(formula_blocks)-1}__"
-    
-    text = re.sub(r'\[f\](.*?)\[/f\]', save_formula_block, text)
     
     # Экранируем специальные символы MarkdownV2
     chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
@@ -203,10 +188,6 @@ def prepare_markdown_message(text: str) -> str:
     # Восстанавливаем блоки кода
     for i, code_block in enumerate(code_blocks):
         text = text.replace(f'__CODE_BLOCK_{i}__', code_block)
-    
-    # Восстанавливаем формулы, но оставляем их в тегах для читаемости
-    for i, formula_block in enumerate(formula_blocks):
-        text = text.replace(f'__FORMULA_BLOCK_{i}__', formula_block)
     
     return text
 
@@ -257,8 +238,6 @@ async def send_message_safe(chat_id: int, text: str, reply_to_message_id: int = 
             try:
                 # Отправляем без форматирования
                 cleaned_text = clean_text(text)
-                # Убираем теги [f] для чистого текста
-                cleaned_text = re.sub(r'\[f\](.*?)\[/f\]', r'\1', cleaned_text)
                 
                 kwargs = {
                     "chat_id": chat_id,
@@ -496,19 +475,6 @@ async def try_model_with_retry(
                                             else:
                                                 text += '`'
                                     
-                                    # Проверяем и корректируем теги формул
-                                    open_tags = text.count('[f]')
-                                    close_tags = text.count('[/f]')
-                                    if open_tags != close_tags:
-                                        logger.warning(f"⚠️ Несбалансированные теги формул: [f]={open_tags}, [/f]={close_tags}")
-                                        # Закрываем незакрытые теги
-                                        if open_tags > close_tags:
-                                            for _ in range(open_tags - close_tags):
-                                                text += '[/f]'
-                                        else:
-                                            # Если закрывающих больше, добавляем открывающие в начало
-                                            text = '[f]' * (close_tags - open_tags) + text
-                                    
                                     # Для DeepSeek R1 добавляем мягкое предупреждение, если ответ обрезан
                                     if "deepseek-r1" in model.lower() and len(text) > 700:
                                         # Проверяем признаки обрезания
@@ -519,8 +485,7 @@ async def try_model_with_retry(
                                                 text += '\n\n<i>Примечание: ответ может быть обрезан из-за ограничений бесплатной модели</i>'
                                     
                                     code_blocks = len(re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', text))
-                                    formula_blocks = len(re.findall(r'\[f\].*?\[/f\]', text))
-                                    logger.info(f"✅ {model.split('/')[-1]} ответил за {elapsed:.1f}с, {len(text)} символов, код: {code_blocks}, формулы: {formula_blocks}")
+                                    logger.info(f"✅ {model.split('/')[-1]} ответил за {elapsed:.1f}с, {len(text)} символов, блоков кода: {code_blocks}")
                                     return text, model, code_blocks
                                 else:
                                     logger.warning(f"⚠️ {model.split('/')[-1]} вернул некорректный ответ: {len(text)} символов")
@@ -561,7 +526,7 @@ LOCAL_RESPONSES = {
     ],
     "код": [
         "💻 **Пример кода для Telegram бота с SberVision**\n\n"
-        "```python\nimport telebot\nimport requests\nimport json\n\n# Настройки\nTOKEN = 'YOUR_BOT_TOKEN'\nSBER_API_KEY = 'YOUR_SBER_VISION_KEY'\n\nbot = telebot.TeleBot(TOKEN)\n\n@bot.message_handler(content_types=['photo'])\ndef handle_photo(message):\n    file_id = message.photo[-1].file_id\n    file_info = bot.get_file(file_id)\n    file_url = f'https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}'\n    \n    response = requests.post(\n        'https://api.sber.dev/vision/v1/ocr',\n        headers={'Authorization': f'Bearer {SBER_API_KEY}'},\n        json={'image_url': file_url}\n    )\n    \n    if response.status_code == 200:\n        result = response.json()\n        text = result.get('text', 'Текст не распознан')\n        bot.reply_to(message, f'📝 Распознанный текст:\\n{text}')\n    else:\n        bot.reply_to(message, '❌ Ошибка распознавания')\n\nbot.polling()\n```\n\n"
+        "```python\nimport telebot\nimport requests\nimport json\n\n# Настройки\nTOKEN = 'YOUR_BOT_TOKEN'\nSBER_API_KEY = 'YOUR_SBER_VISION_KEY'\n\nbot = telebot.TeleBot(TOKEN)\n\n@bot.message_handler(content_types=['photo'])\ndef handle_photo(message):\n    # Получаем файл изображения\n    file_id = message.photo[-1].file_id\n    file_info = bot.get_file(file_id)\n    file_url = f'https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}'\n    \n    # Отправляем в SberVision\n    response = requests.post(\n        'https://api.sber.dev/vision/v1/ocr',\n        headers={'Authorization': f'Bearer {SBER_API_KEY}'},\n        json={'image_url': file_url}\n    )\n    \n    if response.status_code == 200:\n        result = response.json()\n        text = result.get('text', 'Текст не распознан')\n        bot.reply_to(message, f'📝 Распознанный текст:\\n{text}')\n    else:\n        bot.reply_to(message, '❌ Ошибка распознавания')\n\nbot.polling()\n```\n\n"
         "📁 **Структура проекта**:\n"
         "```\nproject/\n├── bot.py\n├── config.py\n├── sber_vision.py\n├── database.py\n└── requirements.txt\n```"
     ],
@@ -619,9 +584,6 @@ async def get_ai_response(user_question: str, response_type: str = "main") -> Tu
                 "Отвечай ясно и по делу. Используй Markdown для форматирования. "
                 "Для кода используй тройные кавычки с указанием языка. "
                 "Всегда закрывай блок кода. "
-                "Для математических формул используй LaTeX и оборачивай их в теги [f] и [/f]. "
-                "Пример: [f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]. "
-                "Не используй Markdown для форматирования формул. "
                 "Держи ответ в 800-1500 символов."
             )
         }
@@ -637,12 +599,9 @@ async def get_ai_response(user_question: str, response_type: str = "main") -> Tu
             "content": (
                 "Ты технический аналитик. Дай глубокий анализ с практическими шагами. "
                 "Используй Markdown, для кода — тройные кавычки с языком. "
-                "Для математических формул используй LaTeX и оборачивай их в теги [f] и [/f]. "
-                "Пример: [f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]. "
                 "Всегда закрывай блоки кода. "
-                "Всегда закрывай теги [f]. "
                 "Будь конкретным и техничным. "
-                "Отвечай развернуто, но в рамках разумного (1000-1800 символов)."
+                "Отвечай развернуто, но в рамках разумного (1000-1800 символов). "
             )
         }
     
@@ -686,14 +645,11 @@ async def cmd_start(message: types.Message):
         "• **DeepSeek R1** — глубокая аналитика\n\n"
         "🤖 **Особенности:**\n"
         "• Работающая подсветка кода в Telegram\n"
-        "• Поддержка математических формул в LaTeX\n"
         "• Увеличенные таймауты для глубоких моделей\n"
         "• Параллельная генерация от двух ИИ\n"
         "• Статистика ответов и времени\n\n"
         "⚡ **Пример кода с подсветкой:**\n"
-        "```python\nprint('Привет, мир!')\n```\n"
-        "🧮 **Пример формулы:**\n"
-        "[f]A = F \\cdot s \\cdot \\cos(\\alpha)[/f]\n\n"
+        "```python\nprint('Привет, мир!')\n```\n\n"
         "❓ Просто задайте вопрос с '?' в конце"
     )
     await send_message_safe(message.chat.id, welcome, message.message_id)
@@ -769,12 +725,8 @@ async def handle_question(message: types.Message):
         if deepseek_model and deepseek_model != "local_fallback":
             models_used.append(deepseek_model.split('/')[-1])
         
-        # Считаем формулы
-        main_formulas = len(re.findall(r'\[f\].*?\[/f\]', main_response)) if main_response else 0
-        deepseek_formulas = len(re.findall(r'\[f\].*?\[/f\]', deepseek_response)) if deepseek_response else 0
-        
         if main_response:
-            logger.info(f"📤 Отправка основного ответа ({len(main_response)} символов, формул: {main_formulas})")
+            logger.info(f"📤 Отправка основного ответа ({len(main_response)} символов)")
             
             await processing_msg.edit_text(
                 "✅ Первый ответ готов! Готовлю анализ...",
@@ -790,7 +742,7 @@ async def handle_question(message: types.Message):
             logger.warning("⚠️ Основной ответ не получен")
         
         if deepseek_response and len(deepseek_response) > 100:
-            logger.info(f"📤 Отправка аналитического ответа ({len(deepseek_response)} символов, формул: {deepseek_formulas})")
+            logger.info(f"📤 Отправка аналитического ответа ({len(deepseek_response)} символов)")
             
             await send_long_message(
                 chat_id,
@@ -800,7 +752,6 @@ async def handle_question(message: types.Message):
             
             if main_response:
                 total_code_blocks = main_code_blocks + deepseek_code_blocks
-                total_formulas = main_formulas + deepseek_formulas
                 completion_text = (
                     f"✅ Анализ завершён!\n"
                     f"⏱️ Общее время: {elapsed:.1f} секунд\n"
@@ -810,9 +761,6 @@ async def handle_question(message: types.Message):
                 
                 if total_code_blocks > 0:
                     completion_text += f"\n💻 Код: {total_code_blocks} блок(ов)"
-                
-                if total_formulas > 0:
-                    completion_text += f"\n🧮 Формулы: {total_formulas}"
                 
                 if models_used:
                     completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
@@ -827,14 +775,11 @@ async def handle_question(message: types.Message):
                 if deepseek_code_blocks > 0:
                     completion_text += f"\n💻 Код: {deepseek_code_blocks} блок(ов)"
                 
-                if deepseek_formulas > 0:
-                    completion_text += f"\n🧮 Формулы: {deepseek_formulas}"
-                
                 if models_used:
                     completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Успешно! Время: {elapsed:.1f}с, модели: {', '.join(models_used) if models_used else 'local_fallback'}, формулы: {total_formulas if main_response else deepseek_formulas}")
+            logger.info(f"✅ Успешно! Время: {elapsed:.1f}с, модели: {', '.join(models_used) if models_used else 'local_fallback'}")
             
         elif main_response:
             completion_text = (
@@ -846,14 +791,11 @@ async def handle_question(message: types.Message):
             if main_code_blocks > 0:
                 completion_text += f"\n💻 Код: {main_code_blocks} блок(ов)"
             
-            if main_formulas > 0:
-                completion_text += f"\n🧮 Формулы: {main_formulas}"
-            
             if models_used:
                 completion_text += f"\n🤖 Модели: {', '.join(models_used)}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
-            logger.info(f"✅ Основной ответ за {elapsed:.1f}с, модель: {models_used[0] if models_used else 'local_fallback'}, формулы: {main_formulas}")
+            logger.info(f"✅ Основной ответ за {elapsed:.1f}с, модель: {models_used[0] if models_used else 'local_fallback'}")
             
         else:
             fallback_response = get_local_fallback_response(user_question)
@@ -866,14 +808,10 @@ async def handle_question(message: types.Message):
             )
             
             fallback_code_blocks = len(re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', fallback_response))
-            fallback_formulas = len(re.findall(r'\[f\].*?\[/f\]', fallback_response))
             completion_text = f"✅ Локальный ответ за {elapsed:.1f}с"
             
             if fallback_code_blocks > 0:
                 completion_text += f"\n💻 Код: {fallback_code_blocks} блок(ов)"
-            
-            if fallback_formulas > 0:
-                completion_text += f"\n🧮 Формулы: {fallback_formulas}"
             
             await processing_msg.edit_text(completion_text, parse_mode=None)
         
