@@ -38,54 +38,56 @@ OPENROUTER_BASE_URL = os.getenv("OPENROUTER_API_BASE_URL", "https://openrouter.a
 OPENROUTER_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 
 # ==================== КОНФИГУРАЦИЯ МОДЕЛЕЙ ====================
-# СВОБОДНАЯ КОНФИГУРАЦИЯ: Редактируйте этот список под ваши нужды
 MODELS_CONFIG = {
     # Основной стек моделей (пробуются по порядку)
     "primary_models": [
-        "meta-llama/llama-3.3-70b-instruct:free",      # Основная стабильная
-        "qwen/qwen-2.5-vl-7b-instruct:free",           # Бесплатная запасная
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen-2.5-vl-7b-instruct:free",
     ],
     
-    # Платные модели (только если указан PAYMENT_REQUIRED=true в .env)
+    # Платные модели (только если указан USE_PAID_MODELS=true в .env)
     "paid_models": [
-        "deepseek/deepseek-v3.2",                      # Платная мощная модель
-        "meta-llama/llama-3.3-70b-instruct",           # Платная версия Llama
+        "deepseek/deepseek-v3.2",
+        "meta-llama/llama-3.3-70b-instruct",
     ],
     
     # Экстренный fallback
     "fallback_models": [
-        "microsoft/phi-3.5-mini-instruct:free",        # Всегда доступна
-        "qwen/qwen2.5-32b-instruct:free",              # Иногда работает
+        "microsoft/phi-3.5-mini-instruct:free",
+        "qwen/qwen2.5-32b-instruct:free",
     ]
 }
 
 # Флаг для разрешения платных моделей
-PAYMENT_ALLOWED = os.getenv("PAYMENT_REQUIRED", "false").lower() == "true"
+USE_PAID_MODELS = os.getenv("USE_PAID_MODELS", "false").lower() == "true"
 
-# Таймауты (в секундах)
+# УВЕЛИЧЕННЫЕ таймауты (в секундах)
 MODEL_TIMEOUTS = {
-    "fast": 30,     # Быстрые модели (phi, qwen-7b)
-    "medium": 45,   # Средние модели
-    "slow": 60,     # Медленные модели (llama 70b)
-    "paid": 90,     # Платные модели (больше времени для качественного ответа)
+    "fast": 45,      # Быстрые модели (phi, qwen-7b)
+    "medium": 60,    # Средние модели
+    "slow": 90,      # Медленные модели (llama 70b)
+    "paid": 120,     # Платные модели (больше времени для качественного ответа)
+    "test": 30,      # Таймаут для тестовой проверки
 }
 
 # ==================== КОНФИГУРАЦИЯ ГЕНЕРАЦИИ ====================
 GENERATION_CONFIG = {
     "temperature": 0.8,
-    "max_tokens": 1500,     # Увеличено для более полных ответов
+    "max_tokens": 1500,
     "top_p": 0.9,
     "frequency_penalty": 0.1,
     "presence_penalty": 0.05,
+    "stream": False,  # Отключаем стриминг для упрощения
 }
 
 # Специальные настройки для платных моделей
 PAID_MODEL_CONFIG = {
     "temperature": 0.7,
-    "max_tokens": 2000,     # Больше токенов для платных моделей
+    "max_tokens": 2000,
     "top_p": 0.85,
     "frequency_penalty": 0.15,
     "presence_penalty": 0.1,
+    "stream": False,
 }
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
@@ -98,16 +100,6 @@ def clean_text(text: str) -> str:
     if not text:
         return ""
     
-    dangerous_chars = [
-        '\u0000', '\u0001', '\u0002', '\u0003', '\u0004', '\u0005',
-        '\u0006', '\u0007', '\u0008', '\u000b', '\u000c',
-        '\u000e', '\u000f', '\u0010', '\u0011', '\u0012',
-        '\u0013', '\u0014', '\u0015', '\u0016', '\u0017',
-        '\u0018', '\u0019', '\u001a', '\u001b', '\u001c',
-        '\u001d', '\u001e', '\u001f', '\u200b', '\u200c',
-        '\u200d', '\ufeff'
-    ]
-    
     cleaned = []
     for char in text:
         cat = unicodedata.category(char)
@@ -117,8 +109,18 @@ def clean_text(text: str) -> str:
     
     text = ''.join(cleaned)
     
-    for char in dangerous_chars:
-        text = text.replace(char, '')
+    # Удаляем опасные символы
+    dangerous_chars = [
+        '\u0000-\u0008', '\u000b', '\u000c', '\u000e-\u001f',
+        '\u200b', '\u200c', '\u200d', '\ufeff'
+    ]
+    
+    for char_range in dangerous_chars:
+        if '-' in char_range:
+            start, end = ord(char_range[0]), ord(char_range[-1])
+            text = ''.join([c for c in text if ord(c) < start or ord(c) > end])
+        else:
+            text = text.replace(char_range, '')
     
     return text
 
@@ -129,7 +131,7 @@ def prepare_html_message(text: str) -> str:
     # Экранируем HTML символы во всем тексте
     text = html.escape(text)
     
-    # Восстанавливаем блоки кода (отменяем экранирование внутри них)
+    # Восстанавливаем блоки кода
     def restore_code_block(match):
         language = match.group(1) if match.group(1) else ''
         code_content = match.group(2)
@@ -150,7 +152,6 @@ def prepare_html_message(text: str) -> str:
     # Обрабатываем inline код
     def restore_inline_code(match):
         code_content = match.group(1)
-        # Отменяем экранирование внутри inline кода
         code_content = code_content.replace('&lt;', '<').replace('&gt;', '>')
         code_content = code_content.replace('&amp;', '&').replace('&quot;', '"')
         code_content = code_content.replace('&#x27;', "'")
@@ -162,10 +163,10 @@ def prepare_html_message(text: str) -> str:
     return text
 
 def prepare_markdown_message(text: str) -> str:
-    """Подготовка Markdown сообщения - простая и надежная версия"""
+    """Подготовка Markdown сообщения"""
     text = clean_text(text)
     
-    # Сначала защищаем блоки кода
+    # Защищаем блоки кода
     code_blocks = []
     def save_code_block(match):
         code_blocks.append(match.group(0))
@@ -173,7 +174,7 @@ def prepare_markdown_message(text: str) -> str:
     
     text = re.sub(r'```[\s\S]*?```', save_code_block, text)
     
-    # Теперь защищаем inline код
+    # Защищаем inline код
     inline_codes = []
     def save_inline_code(match):
         inline_codes.append(match.group(0))
@@ -204,7 +205,7 @@ def has_code_blocks(text: str) -> bool:
 async def send_message_safe(chat_id: int, text: str, reply_to_message_id: int = None) -> Optional[types.Message]:
     """Умная отправка сообщений с автоматическим выбором формата"""
     try:
-        # Сначала пробуем HTML (лучше для кода)
+        # Сначала пробуем HTML
         html_text = prepare_html_message(text)
         
         kwargs = {
@@ -274,7 +275,6 @@ def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
         code_blocks.append(match.group(0))
         return f'__CODE_BLOCK_{len(code_blocks)-1}__'
     
-    # Заменяем блоки кода на плейсхолдеры
     text_with_placeholders = re.sub(code_pattern, replace_code, text)
     
     # Разбиваем по абзацам
@@ -335,7 +335,6 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
         part_length = len(part)
         logger.info(f"📤 Часть {i+1}/{len(parts)}: {part_length} символов")
         
-        # Проверяем наличие кода в части
         has_code = has_code_blocks(part)
         if has_code:
             logger.info(f"📤 Часть {i+1} содержит код")
@@ -356,30 +355,45 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
 
 # ==================== OPENROUTER ФУНКЦИИ ====================
 async def test_model_speed(model: str) -> Tuple[bool, float]:
-    """Тестирование скорости и доступности модели"""
+    """ИСПРАВЛЕННАЯ: Тестирование скорости и доступности модели с увеличенными таймаутами"""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://t.me/freenergy2",
+        "X-Title": "IvanIvanych Bot",
     }
     
+    # УПРОЩЕННЫЙ тестовый промпт для быстрого ответа
     data = {
         "model": model,
-        "messages": [{"role": "user", "content": "Привет"}],
-        "max_tokens": 10
+        "messages": [{"role": "user", "content": "Ответь одним словом: Привет"}],
+        "max_tokens": 1,  # Запрашиваем МИНИМУМ токенов
+        "stream": False   # Отключаем стриминг для простоты
     }
     
     try:
         start = time.time()
-        timeout = aiohttp.ClientTimeout(total=10)  # Уменьшен таймаут для теста
+        # ЗНАЧИТЕЛЬНО УВЕЛИЧЕННЫЕ таймауты для теста
+        timeout_seconds = 40 if "70b" in model or "deepseek" in model else 30
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(OPENROUTER_URL, headers=headers, json=data) as response:
                 elapsed = time.time() - start
                 
+                # Логируем результат для диагностики
                 if response.status == 200:
+                    logger.info(f"  ✅ Тест модели {model.split('/')[-1]} пройден за {elapsed:.2f}с")
                     return True, elapsed
                 else:
+                    error_text = await response.text()
+                    logger.warning(f"  ⚠️ Модель {model.split('/')[-1]} вернула статус {response.status}: {error_text[:100]}")
                     return False, float('inf')
-    except:
+    except asyncio.TimeoutError:
+        logger.warning(f"  ⏱️ Тест модели {model.split('/')[-1]} превысил таймаут ({timeout_seconds}с)")
+        return False, float('inf')
+    except Exception as e:
+        logger.warning(f"  ❌ Ошибка теста модели {model.split('/')[-1]}: {str(e)[:100]}")
         return False, float('inf')
 
 def get_model_timeout(model: str) -> int:
@@ -390,7 +404,7 @@ def get_model_timeout(model: str) -> int:
         return MODEL_TIMEOUTS["fast"]
     elif "qwen2.5-32b" in model_lower or "coder" in model_lower:
         return MODEL_TIMEOUTS["medium"]
-    elif "llama" in model_lower:
+    elif "llama" in model_lower or "70b" in model_lower:
         return MODEL_TIMEOUTS["slow"]
     elif any(paid_model in model_lower for paid_model in ["deepseek-v3", "gpt-4", "claude-3"]):
         return MODEL_TIMEOUTS["paid"]
@@ -398,20 +412,27 @@ def get_model_timeout(model: str) -> int:
     return MODEL_TIMEOUTS["medium"]
 
 async def get_available_models() -> List[Tuple[str, float]]:
-    """Получить список доступных моделей с их скоростью"""
+    """ИСПРАВЛЕННАЯ: Получить список доступных моделей с их скоростью"""
     logger.info("🔍 Проверяю доступность моделей...")
     
+    # Собираем все модели, которые нужно проверить
     all_models = []
     
     # Добавляем основные модели
     all_models.extend(MODELS_CONFIG["primary_models"])
     
     # Добавляем платные модели если разрешено
-    if PAYMENT_ALLOWED:
+    if USE_PAID_MODELS:
+        logger.info("💰 Платные модели включены в проверку")
         all_models.extend(MODELS_CONFIG["paid_models"])
+    else:
+        logger.info("💰 Платные модели отключены")
     
     # Добавляем fallback модели
     all_models.extend(MODELS_CONFIG["fallback_models"])
+    
+    # Убираем возможные дубликаты
+    all_models = list(dict.fromkeys(all_models))
     
     # Тестируем модели
     available_models = []
@@ -420,17 +441,21 @@ async def get_available_models() -> List[Tuple[str, float]]:
         is_available, speed = await test_model_speed(model)
         if is_available:
             available_models.append((model, speed))
-            logger.info(f"  ✅ {model.split('/')[-1]}: {speed:.2f}с")
         else:
             logger.warning(f"  ❌ {model.split('/')[-1]}: недоступна")
     
     # Сортируем по скорости (быстрее - первее)
     available_models.sort(key=lambda x: x[1])
     
-    return [model for model, speed in available_models]
+    if available_models:
+        logger.info(f"✅ Найдено {len(available_models)} доступных моделей")
+        return [model for model, speed in available_models]
+    else:
+        logger.warning("⚠️ Ни одна модель не доступна")
+        return []
 
 async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[str], int]:
-    """Получает ответ от AI с улучшенной логикой выбора модели"""
+    """ИСПРАВЛЕННАЯ: Получает ответ от AI с оптимизированной логикой"""
     
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -468,7 +493,7 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
         model_timeout = get_model_timeout(model)
         logger.info(f"🎯 Пробую модель: {model.split('/')[-1]} (таймаут: {model_timeout}с)")
         
-        for attempt in range(2):  # Уменьшено до 2 попыток
+        for attempt in range(2):  # 2 попытки
             try:
                 # Определяем конфигурацию (платная или обычная)
                 model_lower = model.lower()
@@ -529,14 +554,14 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
                             logger.warning(f"⚠️ {model.split('/')[-1]} ошибка [{response.status}]: {error_text[:200]}")
                     
                     if attempt < 1:  # Только одна повторная попытка
-                        wait_time = 1.5
+                        wait_time = 2.0  # Увеличено с 1.5
                         logger.info(f"🔄 Повторная попытка через {wait_time} секунд...")
                         await asyncio.sleep(wait_time)
                         
             except asyncio.TimeoutError:
                 logger.warning(f"⏱️ Таймаут {model.split('/')[-1]} (> {model_timeout}с)")
                 if attempt < 1:
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2.0)
             except Exception as e:
                 logger.error(f"❌ Ошибка {model.split('/')[-1]}: {e}")
                 break
@@ -608,15 +633,18 @@ async def cmd_start(message: types.Message):
     """Команда /start"""
     welcome = (
         "👋 Привет! Я Иван Иваныч — бот с умной системой ИИ\n\n"
-        "🚀 **Оптимизированная архитектура:**\n"
-        "• **Один стабильный ИИ** вместо двух ненадежных\n"
+        "🚀 **ОПТИМИЗИРОВАННАЯ АРХИТЕКТУРА:**\n"
+        "• **Увеличенные таймауты** для стабильной работы\n"
         "• **Умный выбор модели** по скорости и доступности\n"
-        "• **Поддержка платных моделей** (по желанию)\n"
+        f"• **Платные модели:** {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}\n"
         "• **Работающая подсветка кода** в Telegram\n\n"
         "⚙️ **Текущая конфигурация:**\n"
         f"• Основные модели: {len(MODELS_CONFIG['primary_models'])}\n"
-        f"• Платные модели: {len(MODELS_CONFIG['paid_models']) if PAYMENT_ALLOWED else 'отключены'}\n"
+        f"• Платные модели: {len(MODELS_CONFIG['paid_models']) if USE_PAID_MODELS else 'отключены'}\n"
         f"• Fallback модели: {len(MODELS_CONFIG['fallback_models'])}\n\n"
+        "⏱️ **Таймауты:**\n"
+        f"• Быстрые: {MODEL_TIMEOUTS['fast']}с, Средние: {MODEL_TIMEOUTS['medium']}с\n"
+        f"• Глубокие: {MODEL_TIMEOUTS['slow']}с, Платные: {MODEL_TIMEOUTS['paid']}с\n\n"
         "⚡ **Пример кода с подсветкой:**\n"
         "```python\nprint('Привет, мир!')\n```\n\n"
         "📊 Проверьте доступность моделей: /status\n"
@@ -631,7 +659,6 @@ async def cmd_status(message: types.Message):
     status_msg = await send_message_safe(message.chat.id, status_text, message.message_id)
     
     try:
-        # Проверяем все модели
         logger.info("🔍 Запуск проверки моделей для /status...")
         
         status_report = "📊 **Статус моделей:**\n\n"
@@ -642,7 +669,7 @@ async def cmd_status(message: types.Message):
             ("Fallback модели", MODELS_CONFIG["fallback_models"]),
         ]
         
-        if PAYMENT_ALLOWED:
+        if USE_PAID_MODELS:
             categories.append(("Платные модели", MODELS_CONFIG["paid_models"]))
         
         for category_name, models in categories:
@@ -662,8 +689,10 @@ async def cmd_status(message: types.Message):
         
         status_report += f"⏱️ **Таймауты:** Быстрые: {MODEL_TIMEOUTS['fast']}с, Средние: {MODEL_TIMEOUTS['medium']}с, Глубокие: {MODEL_TIMEOUTS['slow']}с"
         
-        if PAYMENT_ALLOWED:
+        if USE_PAID_MODELS:
             status_report += f", Платные: {MODEL_TIMEOUTS['paid']}с"
+        
+        status_report += f"\n💰 **Платные модели:** {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}"
         
         if status_msg:
             await status_msg.edit_text(status_report, parse_mode="HTML")
@@ -775,27 +804,27 @@ async def main():
     """Основная функция запуска"""
     logger.info("=" * 60)
     logger.info("🚀 Бот IvanIvanych запускается...")
-    logger.info("🤖 ОПТИМИЗИРОВАННАЯ АРХИТЕКТУРА")
+    logger.info("🔄 ОПТИМИЗИРОВАННАЯ ВЕРСИЯ с увеличенными таймаутами")
+    logger.info(f"💰 Платные модели: {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}")
+    
     logger.info("🆓 Основные бесплатные модели:")
     for model in MODELS_CONFIG["primary_models"]:
         logger.info(f"  • {model.split('/')[-1]}")
     
-    if PAYMENT_ALLOWED:
-        logger.info("💰 Платные модели (включены):")
+    if USE_PAID_MODELS:
+        logger.info("💰 Платные модели:")
         for model in MODELS_CONFIG["paid_models"]:
             logger.info(f"  • {model.split('/')[-1]}")
-    else:
-        logger.info("💰 Платные модели: отключены")
     
     logger.info("🛡️ Fallback модели:")
     for model in MODELS_CONFIG["fallback_models"]:
         logger.info(f"  • {model.split('/')[-1]}")
     
-    logger.info("⏱️ ТАЙМАУТЫ:")
+    logger.info("⏱️ УВЕЛИЧЕННЫЕ ТАЙМАУТЫ:")
     logger.info(f"  • Быстрые модели: {MODEL_TIMEOUTS['fast']}с")
     logger.info(f"  • Средние модели: {MODEL_TIMEOUTS['medium']}с")
     logger.info(f"  • Глубокие модели: {MODEL_TIMEOUTS['slow']}с")
-    if PAYMENT_ALLOWED:
+    if USE_PAID_MODELS:
         logger.info(f"  • Платные модели: {MODEL_TIMEOUTS['paid']}с")
     logger.info("=" * 60)
     
@@ -820,6 +849,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Завернение работы")
+        logger.info("👋 Завершение работы")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка: {e}", exc_info=True)
