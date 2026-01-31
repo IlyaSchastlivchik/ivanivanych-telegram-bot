@@ -8,7 +8,11 @@ import unicodedata
 import json
 import random
 import html
-import io # Для работы с файловыми объектами в памяти
+import io
+import zipfile # Для создания ZIP архивов
+import shutil # Для работы с файлами и директориями
+import tempfile # Для создания временных директорий
+
 from typing import Optional, List, Tuple, Dict, Any
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -360,9 +364,9 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
 def generate_html_file_with_code(language: str, filename: str, code_content: str) -> Tuple[str, io.BytesIO]:
     """
     Генерирует HTML файл, который отображает предоставленный код с подсветкой синтаксиса.
+    Возвращает имя файла (возможно, с расширением .html) и байты содержимого HTML.
     """
     # Базовое маппинг для класса языка Prism.js
-    # Для более полного списка, смотрите документацию Prism.js
     prism_lang_class = language.lower()
     if prism_lang_class in ["python", "py"]:
         prism_lang_class = "python"
@@ -383,24 +387,45 @@ def generate_html_file_with_code(language: str, filename: str, code_content: str
     else: # Для неизвестных языков или простого текста
         prism_lang_class = "text"
 
-    # Скрипт для динамической загрузки нужных языков Prism.js
-    # Это более эффективный способ, чем включать все языки сразу
-    prism_languages_loader = f"""
-    Prism.hooks.add('complete', function(env) {{
-        if (env.element && env.language) {{
-            // Try to load the specific language component if not already loaded
-            if (!Prism.languages[env.language]) {{
-                var script = document.createElement('script');
-                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-{env.language}.min.js';
-                script.onload = function() {{ Prism.highlightElement(env.element); }};
-                document.head.appendChild(script);
-            }} else {{
-                Prism.highlightElement(env.element);
-            }}
-        }}
-    }});
-    Prism.highlightAll(); // Initial highlight
-    """
+    # Вставляем сам код. Используем html.escape, чтобы гарантировать, что он будет корректно отображен в HTML.
+    # Prism.js затем интерпретирует его как код.
+    escaped_code_content = html.escape(code_content)
+
+    # Создаем уникальное имя файла, добавляя .html, если оно отсутствует, чтобы избежать конфликтов
+    # и обеспечить правильное открытие в браузере.
+    base_filename, ext = os.path.splitext(filename)
+    # Если язык - HTML, то filename уже может быть .html. Проверяем и формируем имя.
+    if language.lower() == "html" and (not ext or ext.lower() != ".html"):
+        output_filename = f"{base_filename or 'code'}.html"
+    elif not ext: # Если расширения нет совсем
+        output_filename = f"{base_filename or 'code'}.{language if language != 'text' else 'txt'}.html" # Добавляем расширение из языка или как txt.html
+    else: # Если расширение уже есть и это не .html, или язык другой
+        output_filename = f"{base_filename}{ext}.html" # Добавляем .html как индикатор, что это HTML-представление
+
+    # Если filename уже был '.html', то output_filename будет '.html.html', что некорректно.
+    # Исправляем: если filename был 'index.html', output_filename должен остаться 'index.html'.
+    # Если filename был 'script.js', output_filename станет 'script.js.html'.
+    # Это означает, что оригинальные HTML файлы будут иметь расширение .html, а остальные - .[original_ext].html
+    
+    # Простой вариант: всегда использовать filename как есть, если он указан, иначе генерировать 'code.[lang].html'
+    if filename not in ["", None]:
+        # Пытаемся сохранить оригинальное имя, но убедиться, что оно будет открываться как HTML
+        # Например, если filename 'index.html', оставляем 'index.html'. Если 'script.js', делаем 'script.js.html'.
+        # Но для единообразия, лучше всегда отдавать .html
+        parts = filename.split('/')
+        original_basename = parts[-1]
+        base, ext_orig = os.path.splitext(original_basename)
+        if language.lower() == 'html' and (not ext_orig or ext_orig.lower() != ".html"):
+            save_as_filename = f"{base}.html" # Если язык html, убедимся что расширение html
+        elif not ext_orig: # Нет расширения
+             save_as_filename = f"{base if base else 'code'}.{language if language != 'text' else 'txt'}.html"
+        else: # Есть расширение, но это не html. Оборачиваем.
+            save_as_filename = f"{base}{ext_orig}.html"
+
+        # Собираем путь обратно, если он был с директориями
+        output_filename = os.path.join(os.path.dirname(filename), save_as_filename) if os.path.dirname(filename) else save_as_filename
+    else:
+        output_filename = f"code_{language if language != 'text' else 'txt'}.html"
 
     html_content = f"""
 <!DOCTYPE html>
@@ -408,21 +433,20 @@ def generate_html_file_with_code(language: str, filename: str, code_content: str
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Code: {filename}</title>
+    <title>Code: {html.escape(filename)}</title>
     
     <!-- Prism.js Core CSS -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-okaidia.min.css">
     <!-- Prism.js Core JS -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <!-- Dynamically load language components -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-{prism_lang_class}.min.js"></script>
     
-    <!-- Optional: include common language components for faster loading if initial language is known -->
-    <!-- For example: <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script> -->
-
     <style>
         body {{ 
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
-            margin: 20px; 
-            background-color: #282a36; /* Dark background to match prism-okaidia */
+            margin: 15px; 
+            background-color: #282a36; /* Dark background */
             color: #f8f8f2; /* Light text color */
         }}
         pre[class*="language-"] {{ 
@@ -431,44 +455,27 @@ def generate_html_file_with_code(language: str, filename: str, code_content: str
             margin: 0; 
             box-shadow: 0 2px 10px rgba(0,0,0,0.5);
             font-size: 0.9em;
-        }}
-        /* Ensure code blocks are scrollable if they're too long */
-        pre[class*="language-"] {{ 
-            max-height: 80vh; 
+            max-height: 70vh; /* Make code blocks scrollable */
             overflow-y: auto; 
             border-left: 3px solid #50fa7b; /* Accent color */
         }}
-        h1 {{ color: #bd93f9; /* Accent color for title */ }}
+        h1 {{ color: #bd93f9; font-size: 1.5em; margin-bottom: 1em; }}
     </style>
 </head>
 <body>
     <h1>Code Snippet: {html.escape(filename)}</h1>
-    <pre><code class="language-{prism_lang_class}">{html.escape(code_content)}</code></pre>
+    <pre><code class="language-{prism_lang_class}">{escaped_code_content}</code></pre>
     
     <script>
-        // Script to dynamically load Prism language components if needed
-        // For simplicity, we'll load a few common ones directly. More advanced would be dynamic.
-        // If you need many languages, uncomment and adjust the includes below or use a more sophisticated loader.
-        
-        // Example of including a common language component if not Prism's auto-loading works sufficiently
-        // var lang = "{prism_lang_class}";
-        // if (lang !== "text" && !Prism.languages[lang]) {{
-        //     var script = document.createElement('script');
-        //     script.src = 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-{prism_lang_class}.min.js';
-        //     script.onload = function() {{ Prism.highlightElement(document.querySelector('pre code.language-{prism_lang_class}')); }};
-        //     document.head.appendChild(script);
-        // }} else {{
-            Prism.highlightAll(); 
-        // }}
+        // Ensure initial highlighting works when the script for the language loads.
+        // The separate language script loading with onload should handle this.
+        Prism.highlightAll(); 
     </script>
 </body>
 </html>
 """
     # Prepare for sending as a file
     file_data = io.BytesIO(html_content.encode('utf-8'))
-    
-    # Ensure output filename is HTML
-    output_filename = filename if filename.lower().endswith(".html") else f"{filename.split('.')[0]}.html"
     
     return output_filename, file_data # Return filename and file-like object
 
@@ -564,6 +571,8 @@ async def get_available_models() -> Dict[str, List[Tuple[str, float]]]:
 # --- Константы для парсинга вывода файла от AI ---
 FILE_OUTPUT_MARKER_START = "### FILE_OUTPUT_START"
 FILE_OUTPUT_MARKER_END = "### FILE_OUTPUT_END"
+PACKAGE_OUTPUT_MARKER_START = "### PACKAGE_OUTPUT_START"
+PACKAGE_OUTPUT_MARKER_END = "### PACKAGE_OUTPUT_END"
 DEFAULT_CODE_FILENAME = "code.txt"
 DEFAULT_CODE_LANGUAGE = "text"
 
@@ -595,20 +604,38 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
             "Если возможно, используй Unicode символы для обозначений (например, α, β, μ, ∑, ∫). "
             "Всегда закрывай блок кода. "
             
-            "**ОСОБАЯ ИНСТРУКЦИЯ ДЛЯ ВЫВОДА КОДА В ФАЙЛ:**\n"
-            "Если пользователь явно просит тебя предоставить код в виде файла или создать HTML-страницу, "
-            "выводи его, заключив в следующий блок:\n"
-            f"```html\n{FILE_OUTPUT_MARKER_START}\nLanguage: [язык_программирования]\nFilename: [имя_файла.расширение]\n\n[САМ КОД]\n{FILE_OUTPUT_MARKER_END}\n```\n"
-            "   - `[язык_программирования]` должен быть типа `python`, `javascript`, `html`, `css`, `json`, `yaml` и т.д. "
-            "   - `[имя_файла.расширение]` - предлагаемое имя файла (например, `my_script.py`, `index.html`).\n"
-            "   - `[САМ КОД]` - это код, который ты генерируешь.\n"
-            "Примеры:\n"
-            "1. Для Python скрипта:\n"
+            f"**ОСОБАЯ ИНСТРУКЦИЯ ДЛЯ ВЫВОДА КОДА В ФАЙЛ (ОДИНОЧНЫЙ):**\n"
+            f"Если пользователь явно просит тебя предоставить код в виде файла или создать HTML-страницу, "
+            f"выводи его, заключив в следующий блок:\n"
+            f"```html\n{FILE_OUTPUT_MARKER_START}\n"
+            f"Language: [язык_программирования]\n"
+            f"Filename: [имя_файла.расширение]\n\n"
+            f"[САМ КОД]\n"
+            f"{FILE_OUTPUT_MARKER_END}\n"
+            f"```\n"
+            f"   - `[язык_программирования]` должен быть типа `python`, `javascript`, `html`, `css`, `json`, `yaml` и т.д. "
+            f"   - `[имя_файла.расширение]` - предлагаемое имя файла (например, `my_script.py`, `index.html`).\n"
+            f"   - `[САМ КОД]` - это код, который ты генерируешь.\n"
+            f"Примеры:\n"
+            f"1. Для Python скрипта:\n"
             f"```html\n{FILE_OUTPUT_MARKER_START}\nLanguage: python\nFilename: hello_world.py\n\nprint('Hello, world!')\n{FILE_OUTPUT_MARKER_END}\n```\n"
-            "2. Для HTML файла:\n"
+            f"2. Для HTML файла:\n"
             f"```html\n{FILE_OUTPUT_MARKER_START}\nLanguage: html\nFilename: my_page.html\n\n<!DOCTYPE html>\n<html>\n<head>\n    <title>My Page</title>\n</head>\n<body>\n    <h1>Hello</h1>\n</body>\n</html>\n{FILE_OUTPUT_MARKER_END}\n```\n"
-            "Если пользователь не указывает язык или имя файла, используй `Language: {DEFAULT_CODE_LANGUAGE}` и `Filename: {DEFAULT_CODE_FILENAME}`.\n"
-            "Если ты генерируешь HTML файл, то сам код уже будет HTML. Если код на другом языке, бот обернет его в HTML с подсветкой.\n"
+            f"Если язык не указан, используй `{DEFAULT_CODE_LANGUAGE}`. Если имя файла не указано, используй `{DEFAULT_CODE_FILENAME}`.\n"
+            
+            f"**ДЛЯ ВЫВОДА НЕСКОЛЬКИХ ФАЙЛОВ (ПРИЛОЖЕНИЯ/ПРОЕКТА) В ОДНОМ АРХИВЕ ZIP:**\n"
+            f"Если пользователь просит отправить проект из нескольких файлов или весь каталог, используй следующий формат:\n"
+            f"```json\n{PACKAGE_OUTPUT_MARKER_START}\n{{"
+            f"\"folder_name\": \"[имя_папки]\",\n"
+            f"\"files\": [\n"
+            f"    {{\"filename\": \"[путь/имя_файла.расширение]\", \"language\": \"[язык]\", \"content\": \"[содержимое_файла]\"}},\n"
+            f"    ...\n"
+            f"]\n}}\n{PACKAGE_OUTPUT_MARKER_END}\n```\n"
+            f"   - `[имя_папки]` - корневое имя для архива (например, `my_web_app`).\n"
+            f"   - `[путь/имя_файла.расширение]` - полный путь внутри папки (например, `src/components/Button.js`, `index.html`).\n"
+            f"   - `[язык]` - язык программирования для подсветки (аналогично `Language:` в `FILE_OUTPUT_MARKER`).\n"
+            f"   - `[содержимое_файла]` - сам контент файла (должен быть в виде строки, экранированной для JSON).\n"
+            f"AI должен отдавать предпочтение формату `PACKAGE_OUTPUT_START` для нескольких файлов.\n"
             
             "\nДержи ответ в 800-1500 символов."
         )
@@ -783,9 +810,9 @@ def get_local_fallback_response(user_question: str) -> str:
     question_lower = user_question.lower()
     
     # Простая эвристика для выбора наиболее релевантного локального ответа
-    if any(word in question_lower for word in ['код', 'пример', 'программир', 'python', 'javascript', 'api', 'telegram', 'script', 'файл', 'создать', 'html', 'css', 'json']):
+    if any(word in question_lower for word in ['код', 'пример', 'программир', 'python', 'javascript', 'api', 'telegram', 'script', 'файл', 'создай', 'html', 'css', 'json', 'проект', 'папка', 'архив', 'каталог', 'несколько файлов']):
         topic = "код"
-    elif any(word in question_lower for word in ['физик', 'формул', 'работа', 'гравитац', 'механик', 'энерги', 'ньютон', 'джоуль', 'электр', 'вольт', 'ампер', 'ом', 'батаре', 'напряжен', 'ток', 'сопротивлен']):
+    elif any(word in question_lower for word in ['физик', 'формул', 'работа', 'гравитац', 'механик', 'энерги', 'ньютон', 'джоуль', 'электр', 'вольт', 'ампер', 'ом', 'батаре', 'напряжен', 'ток', 'сопротивлен', 'уравнен', ' интеграл', 'сумма']):
         topic = "общий"
     elif any(word in question_lower for word in ['технолог', 'ai', 'модель', 'сервис', 'сервер']):
         topic = "технология"
@@ -806,6 +833,7 @@ async def cmd_start(message: types.Message):
         "• **Стабильная работа:** Увеличенные таймауты и система повторных попыток.\n"
         "• **Продвинутая обработка кода:** Корректная подсветка синтаксиса в Telegram.\n"
         "• **Генерация файлов:** Могу создавать и отправлять HTML-файлы с кодом и подсветкой.\n"
+        "• **Отправка ZIP-архивов:** Для проектов из нескольких файлов.\n"
         "• **Научные темы:** Ответы с использованием Unicode/ASCII для формул (в текстовом формате).\n"
         f"• **Платные модели:** {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}. Попробуйте задать сложный вопрос!\n\n"
         "⚙️ **Текущая конфигурация:**\n"
@@ -820,6 +848,7 @@ async def cmd_start(message: types.Message):
         "📊 Проверьте доступность AI-моделей: `/status`\n"
         "❓ Просто задайте вопрос с вопросительным знаком '?' в конце."
         "\n💡 Чтобы получить код как файл, запросите: 'Дай мне [язык] код для [задачи] как файл' или 'Создай HTML файл с [описание]'.\n"
+        "💡 Для отправки проекта из нескольких файлов: 'Сделай мне проект [название] из [описание] и отправь как ZIP'.\n"
     )
     await send_message_safe(message.chat.id, welcome_text, message.message_id)
 
@@ -871,9 +900,15 @@ async def cmd_status(message: types.Message):
         error_text = f"❌ Произошла ошибка при проверке статуса: {str(e)[:150]}"
         await processing_msg.edit_text(error_text, parse_mode=None)
 
-@dp.message(lambda msg: msg.text and (msg.text.strip().endswith('?') or msg.text.strip().lower().startswith("код") or msg.text.strip().lower().startswith("создай")))
+@dp.message(lambda msg: msg.text and (
+    msg.text.strip().endswith('?') or 
+    msg.text.strip().lower().startswith("код") or 
+    msg.text.strip().lower().startswith("создай") or
+    msg.text.strip().lower().startswith("сделай") or
+    msg.text.strip().lower().startswith("дай мне")
+))
 async def handle_question(message: types.Message):
-    """Обработка пользовательских вопросов. Может отправлять обычный текст или файл с кодом."""
+    """Обработка пользовательских вопросов. Может отправлять одиночные файлы, ZIP-архивы или обычный текст."""
     user_question = message.text.strip()
     chat_id = message.chat.id
     
@@ -897,18 +932,107 @@ async def handle_question(message: types.Message):
         elapsed = time.time() - start_time
         
         if response:
-            # --- ПРОВЕРКА НА СПЕЦИАЛЬНЫЙ ВЫВОД ФАЙЛА ОТ AI ---
-            file_output_match = re.search(rf"{FILE_OUTPUT_MARKER_START}(.*?){FILE_OUTPUT_MARKER_END}", response, re.DOTALL)
+            # --- ПРОВЕРКА НА СПЕЦИАЛЬНЫЙ ВЫВОД ПАКЕТА ФАЙЛОВ ОТ AI ---
+            package_output_match = re.search(rf"{PACKAGE_OUTPUT_MARKER_START}(.*?){PACKAGE_OUTPUT_MARKER_END}", response, re.DOTALL)
             
-            if file_output_match:
-                # Парсим вывод файла
+            if package_output_match:
+                # --- ОБРАБОТКА ПАКЕТА ФАЙЛОВ (ZIP) ---
+                logger.info("✨ Обнаружен вывод пакета файлов.")
+                await processing_msg.edit_text("📂 Собираю и архивирую файлы...", parse_mode=None)
+
+                try:
+                    package_content_str = package_output_match.group(1).strip()
+                    package_data = json.loads(package_content_str)
+                    
+                    folder_name = package_data.get("folder_name", "project")
+                    files = package_data.get("files", [])
+
+                    if not files:
+                        raise ValueError("В пакете файлов не найдено ни одного файла.")
+
+                    # Создаем временную директорию
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        folder_path = os.path.join(tmpdir, folder_name)
+                        os.makedirs(folder_path, exist_ok=True)
+
+                        # Создаем файлы внутри временной директории
+                        for file_info in files:
+                            filename = file_info.get("filename")
+                            language = file_info.get("language", DEFAULT_CODE_LANGUAGE)
+                            content = file_info.get("content", "")
+
+                            if not filename:
+                                logger.warning("Пропущен файл без имени в пакете.")
+                                continue
+
+                            # Генерируем HTML для просмотра кода (независимо от исходного языка)
+                            # Сохраняем сгенерированный HTML с подсвеченным кодом
+                            output_html_filename, html_file_data = generate_html_file_with_code(language, filename, content)
+                            
+                            # Полный путь для сохранения файла во временной директории
+                            final_save_path = os.path.join(folder_path, output_html_filename)
+                            
+                            # Убедимся, что родительская директория существует
+                            os.makedirs(os.path.dirname(final_save_path), exist_ok=True)
+
+                            with open(final_save_path, "wb") as f:
+                                f.write(html_file_data.getvalue())
+                            logger.info(f"Сохранен файл: {os.path.relpath(final_save_path, tmpdir)}")
+
+                        # Создаем ZIP архив
+                        zip_filename_base = folder_name # Имя ZIP файла без .zip
+                        zip_filepath = os.path.join(tmpdir, f"{zip_filename_base}.zip")
+                        
+                        with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                            for root, dirs, files_in_dir in os.walk(folder_path):
+                                for file_ in files_in_dir:
+                                    file_path = os.path.join(root, file_)
+                                    # Добавляем файл в архив, сохраняя относительный путь относительно folder_path
+                                    zipf.write(file_path, os.path.relpath(file_path, folder_path))
+                        
+                        logger.info(f"ZIP архив '{os.path.basename(zip_filepath)}' создан.")
+
+                        # Отправляем ZIP файл
+                        # Убедимся, что заголовок сообщения обновлен
+                        await processing_msg.edit_text("⬆️ Отправляю архив с файлами...", parse_mode=None)
+                        
+                        # Получаем весь текст ответа AI, чтобы извлечь финальное сообщение для подписи
+                        # Удаляем блок PACKAGE_OUTPUT, чтобы получить остальной текст.
+                        caption_text = response.replace(package_output_match.group(0), "").strip()
+                        if not caption_text: caption_text = "Ваш архив с файлами готов!"
+                        
+                        await bot.send_document(
+                            chat_id=chat_id,
+                            document=types.FSInputFile(zip_filepath), # FSInputFile для отправки локальных файлов
+                            caption=f"Архив с вашими файлами: `{os.path.basename(zip_filepath)}`\n{caption_text}",
+                            reply_to_message_id=message.message_id
+                        )
+                        logger.info(f"ZIP архив '{os.path.basename(zip_filepath)}' отправлен.")
+                        
+                        # Обновляем статус сообщения
+                        final_status_text = f"✅ архив '{os.path.basename(zip_filepath)}' с {len(files)} файлами готов!\n" + \
+                                            f"⏱️ Время генерации: {elapsed:.1f} с\n"
+
+                except json.JSONDecodeError:
+                    logger.error("Ошибка декодирования JSON из вывода пакета файлов.")
+                    await processing_msg.edit_text("❌ Ошибка: Не удалось разобрать данные для пакета файлов.", parse_mode=None)
+                except FileNotFoundError:
+                    logger.error("Ошибка при создании временного файла/директории.")
+                    await processing_msg.edit_text("❌ Ошибка при работе с временными файлами.", parse_mode=None)
+                except Exception as e:
+                    logger.error(f"❌ Ошибка при обработке пакета файлов: {e}", exc_info=True)
+                    await processing_msg.edit_text(f"❌ Произошла ошибка при создании архива: {str(e)[:150]}", parse_mode=None)
+
+            # --- Если это был одиночный файл, а не пакет ---
+            elif file_output_match:
+                logger.info("✨ Обнаружен вывод одиночного файла.")
+                await processing_msg.edit_text("⬆️ Отправляю файл...", parse_mode=None)
+
                 file_output_content = file_output_match.group(1).strip()
-                
                 language = DEFAULT_CODE_LANGUAGE
                 filename = DEFAULT_CODE_FILENAME
                 code_content_lines = []
                 
-                # Парсинг строк Language: и Filename:
                 parsing_header = True # Флаг для определения, парсим ли мы заголовок или код
                 for line in file_output_content.split('\n'):
                     stripped_line = line.strip()
@@ -923,40 +1047,31 @@ async def handle_question(message: types.Message):
                 
                 code_content = "\n".join(code_content_lines).strip()
 
-                logger.info(f"✨ Обнаружен вывод файла: Язык='{language}', Имя='{filename}', Длина кода={len(code_content)}")
-
-                # Генерируем HTML файл
-                # Если AI сгенерировал HTML, он будет обернут как есть.
-                # Иначе, код будет обернут в HTML с подсветкой.
-                output_filename, file_data = generate_html_file_with_code(language, filename, code_content)
+                # Генерируем HTML для просмотра кода
+                output_html_filename, file_data = generate_html_file_with_code(language, filename, code_content)
                 
-                # Удаляем маркеры и код из основного ответа, если они были
-                # (чтобы не отправлять их как обычный текст)
-                response_for_caption = response.replace(file_output_match.group(0), "").strip()
-                if not response_for_caption: # Если кроме файла ничего не было
-                    response_for_caption = "Сгенерировано по вашему запросу."
+                # Отправляем как документ
+                caption_text = response.replace(file_output_match.group(0), "").strip()
+                if not caption_text: caption_text = "Ваш файл с подсвеченным кодом готов!"
 
-                # Отправляем файл
                 await bot.send_document(
                     chat_id=chat_id,
-                    document=types.BufferedInputFile(file_data.getvalue(), filename=output_filename),
-                    caption=f"💡 Ваш файл '{output_filename}' готов:\n\n{response_for_caption}",
+                    document=types.BufferedInputFile(file_data.getvalue(), filename=output_html_filename),
+                    caption=f"Ваш файл '{output_html_filename}' готов:\n{caption_text}",
                     reply_to_message_id=message.message_id
                 )
-                logger.info(f"📩 Файл '{output_filename}' отправлен.")
+                logger.info(f"Файл '{output_html_filename}' отправлен.")
 
             else:
                 # --- Обычная отправка ответа (не файл) ---
                 await processing_msg.edit_text("✅ Ответ готов! Отправляю...", parse_mode=None)
-                
-                # Отправляем ответ, используя smart splitting для длинных сообщений
                 await send_long_message(
                     chat_id,
                     f"🤖 **Ответ ИИ:**\n\n{response}",
                     message.message_id
                 )
             
-            # --- Обновление статусного сообщения ---
+            # --- Обновление статус сообщения (общий для всех успешных ответов) ---
             model_name_display = model_used.split('/')[-1] if model_used != "local_fallback" else "Локальная база знаний"
             
             final_status_text = (
@@ -1013,7 +1128,7 @@ async def main():
     """Основная функция запуска бота."""
     logger.info("=" * 60)
     logger.info("🚀 Бот IvanIvanych запускается...")
-    logger.info("🔄 ОПТИМИЗИРОВАННАЯ ВЕРСИЯ с улучшенной логикой выбора моделей.")
+    logger.info("🔄 ОПТИМИЗИРОВАННАЯ ВЕРСИЯ с поддержкой ZIP-архивов кода.")
     # Проверяем USE_PAID_MODELS, как оно было прочитано
     logger.info(f"💰 Платные модели: {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}")
     
