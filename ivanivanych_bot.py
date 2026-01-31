@@ -16,7 +16,44 @@ from aiogram.enums import ChatAction
 from dotenv import load_dotenv
 
 # ==================== НАСТРОЙКА ====================
-load_dotenv()
+# Пытаемся загрузить .env явно из стандартного пути для Render Secret Files
+ENV_FILE_PATH = '/etc/secrets/.env'
+
+try:
+    if os.path.exists(ENV_FILE_PATH):
+        load_dotenv(dotenv_path=ENV_FILE_PATH)
+        logger.info(f"✅ Успешно загружен .env файл из {ENV_FILE_PATH}")
+    else:
+        # Если файл не найден по явному пути, пробуем стандартный поиск load_dotenv()
+        logger.warning(f"⚠️ Файл .env не найден по пути {ENV_FILE_PATH}. Попытка загрузить стандартным путем.")
+        load_dotenv()
+        logger.info("✅ Использован стандартный поиск .env файла.")
+except Exception as e:
+    logger.error(f"❌ Ошибка при загрузке .env файла: {e}")
+    # Продолжаем работу, полагаясь на переменные, установленные напрямую в Render
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+# Проверка переменных окружения
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+# --- ДОПОЛНИТЕЛЬНЫЙ ДЕБАГГИНГ ---
+# Выводим значение переменной USE_PAID_MODELS, чтобы точно понять, что считывается
+raw_use_paid_models_value = os.getenv("USE_PAID_MODELS", "false") # Используем "false" как дефолт, если переменная не найдена
+logger.info(f"🌟 DEBUG: Сырое значение USE_PAID_MODELS из os.getenv: '{raw_use_paid_models_value}'")
+# --- КОНЕЦ ДОПОЛНИТЕЛЬНОГО ДЕБАГГИНГА ---
+
+# Убедитесь, что ваша логика определения USE_PAID_MODELS в коде корректна
+# current_use_paid_models_flag = raw_use_paid_models_value.lower() == "true"
+# logger.info(f"🌟 DEBUG: Флаг USE_PAID_MODELS установлен в: {current_use_paid_models_flag}")
+# USE_PAID_MODELS = current_use_paid_models_flag
 
 # Настройка логирования
 logging.basicConfig(
