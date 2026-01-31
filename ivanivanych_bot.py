@@ -1,4 +1,3 @@
-```python
 import asyncio
 import logging
 import os
@@ -1111,4 +1110,3 @@ if __name__ == "__main__":
         logger.info("👋 Завершение работы программы.")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка при запуске asyncio: {e}", exc_info=True)
-```
