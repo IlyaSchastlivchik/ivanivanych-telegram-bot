@@ -8,6 +8,7 @@ import unicodedata
 import json
 import random
 import html
+import io # Для работы с файловыми объектами в памяти
 from typing import Optional, List, Tuple, Dict, Any
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 logger.info("🚀 Инициализация скрипта IvanIvanych Bot...")
 
 # ----- 2. ЗАГРУЗКА .ENV ФАЙЛА -----
+# Используется для локальной разработки или если переменные не установлены в Render
 ENV_FILE_PATH = '/etc/secrets/.env' 
 
 try:
@@ -55,7 +57,7 @@ logger.info(f"🌟 DEBUG: Флаг USE_PAID_MODELS установлен в: {USE
 
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
     logger.error("❌ Ошибка: Отсутствуют обязательные переменные окружения (TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY). ")
-    exit(1)
+    exit(1) # Завершаем работу, если критические ключи не установлены
 
 # Конфигурация OpenRouter API
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_API_BASE_URL", "https://openrouter.ai/api/v1")
@@ -79,11 +81,11 @@ MODELS_CONFIG = {
 }
 
 MODEL_TIMEOUTS = {
-    "fast": 45,
-    "medium": 60,
-    "slow": 90,
-    "paid": 120,
-    "test": 30,
+    "fast": 45,      # Быстрые модели
+    "medium": 60,    # Средние модели
+    "slow": 90,      # Медленные модели
+    "paid": 120,     # Платные модели
+    "test": 30,      # Таймаут для теста доступности
 }
 
 # ==================== КОНФИГУРАЦИЯ ГЕНЕРАЦИИ ====================
@@ -119,12 +121,14 @@ def clean_text(text: str) -> str:
     cleaned = []
     for char in text:
         cat = unicodedata.category(char)
+        # Пропускаем управляющие символы, кроме переносов строк и табуляции
         if cat[0] == 'C' and char not in ['\n', '\r', '\t']:
             continue
         cleaned.append(char)
     
     text = ''.join(cleaned)
     
+    # Удаляем известные опасные диапазоны символов (некоторые символы нулевой ширины и т.д.)
     dangerous_chars_ranges = [
         '\u0000-\u0008', '\u000b', '\u000c', '\u000e-\u001f',
         '\u200b', '\u200c', '\u200d', '\ufeff'
@@ -173,6 +177,7 @@ def prepare_html_message(text: str) -> str:
         if match:
             lang = match.group(2)
             content = match.group(3)
+            # Отменяем экранирование, сделанное html.escape внутри кода
             restored_content = content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
             restored_content = restored_content.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
             
@@ -181,6 +186,7 @@ def prepare_html_message(text: str) -> str:
 
     # --- Восстанавливаем инлайн-код ---
     for key, inline_content in inline_code_map.items():
+        # Отменяем экранирование для контента инлайн-кода
         restored_content = inline_content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
         restored_content = restored_content.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
         
@@ -211,15 +217,18 @@ def prepare_markdown_message(text: str) -> str:
     text_with_placeholders = re.sub(r'`[^`\n]+`', save_inline_code, text_with_placeholders)
     
     # --- Экранируем специальные символы MarkdownV2 ---
+    # Символы, которые нужно экранировать, чтобы они отображались как есть.
     chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
     
     for char in chars_to_escape:
         text_with_placeholders = text_with_placeholders.replace(char, '\\' + char)
     
     # --- Восстанавливаем оригинальные блоки кода и инлайн-код ---
+    # Сначала инлайн-код
     for i, inline_code_segment in enumerate(inline_codes):
         text_with_placeholders = text_with_placeholders.replace(f'__INLINE_CODE_{i}__', inline_code_segment)
     
+    # Затем блоки кода
     for i, code_block_segment in enumerate(code_blocks):
         text_with_placeholders = text_with_placeholders.replace(f'__CODE_BLOCK_{i}__', code_block_segment)
     
@@ -294,10 +303,11 @@ def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
         if len(current_part) + len(para) + 2 <= max_length:
             current_part += para + "\n\n"
         else:
-            if len(para) > max_length:
-                if current_part:
+            if len(para) > max_length: # Если сам параграф слишком длинный
+                if current_part: # Сначала сохраняем накопленный текущий кусок
                     parts.append(current_part.strip())
                     current_part = ""
+                # Разбиваем длинный параграф на строки
                 lines = para.split('\n')
                 temp_para_part = ""
                 for line in lines:
@@ -307,16 +317,17 @@ def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
                         if temp_para_part:
                             parts.append(temp_para_part.strip())
                         temp_para_part = line + "\n"
-                if temp_para_part:
+                if temp_para_part: # Добавляем последнюю часть разбитого параграфа
                     parts.append(temp_para_part.strip())
-            else:
-                if current_part:
+            else: # Параграф умещается, но его добавление превысит лимит
+                if current_part: # Сохраняем предыдущую часть
                     parts.append(current_part.strip())
-                current_part = para + "\n\n"
+                current_part = para + "\n\n" # Начинаем новую часть с текущего параграфа
 
-    if current_part:
+    if current_part: # Добавляем последнюю накопленную часть
         parts.append(current_part.strip())
     
+    # Восстанавливаем блоки кода в каждой части
     final_parts = []
     for part in parts:
         restored_part = part
@@ -325,6 +336,7 @@ def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
             restored_part = restored_part.replace(placeholder, code_block)
         final_parts.append(restored_part.strip())
     
+    # Фильтруем пустые части, которые могли появиться после стриппинга
     return [p for p in final_parts if p]
 
 async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = None):
@@ -339,10 +351,126 @@ async def send_long_message(chat_id: int, text: str, reply_to_message_id: int = 
         await send_message_safe(
             chat_id=chat_id,
             text=part,
-            reply_to_message_id=reply_to_message_id if i == 0 else None
+            reply_to_message_id=reply_to_message_id if i == 0 else None # Отвечаем только на первое сообщение
         )
-        if i < len(parts) - 1:
+        if i < len(parts) - 1: # Небольшая задержка между частями
             await asyncio.sleep(0.5)
+
+# ----- Функция генерации HTML файла с подсветкой кода -----
+def generate_html_file_with_code(language: str, filename: str, code_content: str) -> Tuple[str, io.BytesIO]:
+    """
+    Генерирует HTML файл, который отображает предоставленный код с подсветкой синтаксиса.
+    """
+    # Базовое маппинг для класса языка Prism.js
+    # Для более полного списка, смотрите документацию Prism.js
+    prism_lang_class = language.lower()
+    if prism_lang_class in ["python", "py"]:
+        prism_lang_class = "python"
+    elif prism_lang_class in ["javascript", "js"]:
+        prism_lang_class = "javascript"
+    elif prism_lang_class in ["html", "html5"]:
+        prism_lang_class = "html"
+    elif prism_lang_class == "css":
+        prism_lang_class = "css"
+    elif prism_lang_class == "json":
+        prism_lang_class = "json"
+    elif prism_lang_class == "yaml":
+        prism_lang_class = "yaml"
+    elif prism_lang_class == "bash" or prism_lang_class == "shell":
+        prism_lang_class = "bash"
+    elif prism_lang_class == "markdown":
+        prism_lang_class = "markdown"
+    else: # Для неизвестных языков или простого текста
+        prism_lang_class = "text"
+
+    # Скрипт для динамической загрузки нужных языков Prism.js
+    # Это более эффективный способ, чем включать все языки сразу
+    prism_languages_loader = f"""
+    Prism.hooks.add('complete', function(env) {{
+        if (env.element && env.language) {{
+            // Try to load the specific language component if not already loaded
+            if (!Prism.languages[env.language]) {{
+                var script = document.createElement('script');
+                script.src = 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-{env.language}.min.js';
+                script.onload = function() {{ Prism.highlightElement(env.element); }};
+                document.head.appendChild(script);
+            }} else {{
+                Prism.highlightElement(env.element);
+            }}
+        }}
+    }});
+    Prism.highlightAll(); // Initial highlight
+    """
+
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code: {filename}</title>
+    
+    <!-- Prism.js Core CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-okaidia.min.css">
+    <!-- Prism.js Core JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    
+    <!-- Optional: include common language components for faster loading if initial language is known -->
+    <!-- For example: <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script> -->
+
+    <style>
+        body {{ 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 20px; 
+            background-color: #282a36; /* Dark background to match prism-okaidia */
+            color: #f8f8f2; /* Light text color */
+        }}
+        pre[class*="language-"] {{ 
+            padding: 1em; 
+            border-radius: 8px; 
+            margin: 0; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+            font-size: 0.9em;
+        }}
+        /* Ensure code blocks are scrollable if they're too long */
+        pre[class*="language-"] {{ 
+            max-height: 80vh; 
+            overflow-y: auto; 
+            border-left: 3px solid #50fa7b; /* Accent color */
+        }}
+        h1 {{ color: #bd93f9; /* Accent color for title */ }}
+    </style>
+</head>
+<body>
+    <h1>Code Snippet: {html.escape(filename)}</h1>
+    <pre><code class="language-{prism_lang_class}">{html.escape(code_content)}</code></pre>
+    
+    <script>
+        // Script to dynamically load Prism language components if needed
+        // For simplicity, we'll load a few common ones directly. More advanced would be dynamic.
+        // If you need many languages, uncomment and adjust the includes below or use a more sophisticated loader.
+        
+        // Example of including a common language component if not Prism's auto-loading works sufficiently
+        // var lang = "{prism_lang_class}";
+        // if (lang !== "text" && !Prism.languages[lang]) {{
+        //     var script = document.createElement('script');
+        //     script.src = 'https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-{prism_lang_class}.min.js';
+        //     script.onload = function() {{ Prism.highlightElement(document.querySelector('pre code.language-{prism_lang_class}')); }};
+        //     document.head.appendChild(script);
+        // }} else {{
+            Prism.highlightAll(); 
+        // }}
+    </script>
+</body>
+</html>
+"""
+    # Prepare for sending as a file
+    file_data = io.BytesIO(html_content.encode('utf-8'))
+    
+    # Ensure output filename is HTML
+    output_filename = filename if filename.lower().endswith(".html") else f"{filename.split('.')[0]}.html"
+    
+    return output_filename, file_data # Return filename and file-like object
 
 # ==================== OPENROUTER ФУНКЦИИ ====================
 
@@ -433,16 +561,24 @@ async def get_available_models() -> Dict[str, List[Tuple[str, float]]]:
 
     return available_models_grouped
 
+# --- Константы для парсинга вывода файла от AI ---
+FILE_OUTPUT_MARKER_START = "### FILE_OUTPUT_START"
+FILE_OUTPUT_MARKER_END = "### FILE_OUTPUT_END"
+DEFAULT_CODE_FILENAME = "code.txt"
+DEFAULT_CODE_LANGUAGE = "text"
+
 async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[str], int]:
     """
     Получает ответ от AI, выбирая лучшую модель по приоритету.
     Инструктирует AI использовать Unicode/ASCII для формул, избегая LaTeX.
+    
+    Возвращает: (текст_ответа, имя_модели, кол-во_блоков_кода)
     """
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/freenergy2",
-        "X-Title": "IvanIvanych Bot",
+        "HTTP-Referer": "https://t.me/freenergy2", # Поле для трекинга
+        "X-Title": "IvanIvanych Bot", # Название вашего приложения
     }
     
     # --- ИЗМЕНЕННЫЙ СИСТЕМНЫЙ ПРОМПТ ---
@@ -452,25 +588,39 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
             "Ты Иван Иваныч — эксперт в технологиях и футуристике. "
             "Отвечай ясно и по делу. Используй Markdown для форматирования. "
             "Для кода используй тройные кавычки с указанием языка (например, ```python). "
-            # -------- ИНСТРУКЦИЯ ДЛЯ ФОРМУЛ И SIMPLIFIED MATH --------
             "Для физических и математических формул, используй доступные Unicode символы "
             "и максимально приближенное к математическому написание с помощью стандартных символов клавиатуры (ASCII). "
             "Например: E=mc^2 (вместо E=mc²), a/b (вместо \\frac{a}{b}), Sum(i=0 to n) x_i (вместо ∑_{i=0}^{n} x_i). "
             "Избегай LaTeX синтаксиса. Фокусируйся на читаемости в обычном текстовом формате Telegram. "
             "Если возможно, используй Unicode символы для обозначений (например, α, β, μ, ∑, ∫). "
-            # -------- КОНЕЦ ИНСТРУКЦИИ --------
             "Всегда закрывай блок кода. "
-            "Держи ответ в 800-1500 символов."
+            
+            "**ОСОБАЯ ИНСТРУКЦИЯ ДЛЯ ВЫВОДА КОДА В ФАЙЛ:**\n"
+            "Если пользователь явно просит тебя предоставить код в виде файла или создать HTML-страницу, "
+            "выводи его, заключив в следующий блок:\n"
+            f"```html\n{FILE_OUTPUT_MARKER_START}\nLanguage: [язык_программирования]\nFilename: [имя_файла.расширение]\n\n[САМ КОД]\n{FILE_OUTPUT_MARKER_END}\n```\n"
+            "   - `[язык_программирования]` должен быть типа `python`, `javascript`, `html`, `css`, `json`, `yaml` и т.д. "
+            "   - `[имя_файла.расширение]` - предлагаемое имя файла (например, `my_script.py`, `index.html`).\n"
+            "   - `[САМ КОД]` - это код, который ты генерируешь.\n"
+            "Примеры:\n"
+            "1. Для Python скрипта:\n"
+            f"```html\n{FILE_OUTPUT_MARKER_START}\nLanguage: python\nFilename: hello_world.py\n\nprint('Hello, world!')\n{FILE_OUTPUT_MARKER_END}\n```\n"
+            "2. Для HTML файла:\n"
+            f"```html\n{FILE_OUTPUT_MARKER_START}\nLanguage: html\nFilename: my_page.html\n\n<!DOCTYPE html>\n<html>\n<head>\n    <title>My Page</title>\n</head>\n<body>\n    <h1>Hello</h1>\n</body>\n</html>\n{FILE_OUTPUT_MARKER_END}\n```\n"
+            "Если пользователь не указывает язык или имя файла, используй `Language: {DEFAULT_CODE_LANGUAGE}` и `Filename: {DEFAULT_CODE_FILENAME}`.\n"
+            "Если ты генерируешь HTML файл, то сам код уже будет HTML. Если код на другом языке, бот обернет его в HTML с подсветкой.\n"
+            
+            "\nДержи ответ в 800-1500 символов."
         )
     }
     # --- КОНЕЦ ИЗМЕНЕННОГО ПРОМПТА ---
     
     available_models_data = await get_available_models()
-    selected_model_info = None
+    selected_model_info = None # Будет содержать (имя_модели, тип_модели)
 
     # Приоритет выбора модели
     if available_models_data.get('primary_free'):
-        model_name, speed = available_models_data['primary_free'][0]
+        model_name, speed = available_models_data['primary_free'][0] # Берем самую быструю из доступных
         selected_model_info = (model_name, 'primary_free')
         logger.info(f"🎯 Выбрана основная бесплатная модель: {model_name.split('/')[-1]} (Скорость: {speed:.2f}с)")
     elif available_models_data.get('secondary_free'):
@@ -484,52 +634,69 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
     else:
         logger.warning("⚠️ ВСЕ AI модели недоступны или отключены, перехожу на локальный ответ.")
         response = get_local_fallback_response(user_question)
-        return response, "local_fallback", 0
+        return response, "local_fallback", 0 # Возвращаем локальный ответ без кода
 
+    # --- Если модель AI была выбрана, приступаем к запросу ---
     model_to_use, model_type_tag = selected_model_info
+    
+    # Определяем конфигурацию и тип модели для логгирования
     current_config = PAID_MODEL_CONFIG if model_type_tag == 'paid' else GENERATION_CONFIG
     display_model_type = "💰 Платная" if model_type_tag == 'paid' else "🆓 Бесплатная"
+    
+    # Определяем таймаут для выбранной модели
     model_timeout = get_model_timeout(model_to_use)
     logger.info(f"▶️ Буду использовать модель: {model_to_use.split('/')[-1]} ({display_model_type}, таймаут: {model_timeout}с)")
 
+    # Формируем данные для запроса
     data = {
         "model": model_to_use,
         "messages": [
             system_prompt,
             {"role": "user", "content": user_question}
         ],
-        **current_config
+        **current_config # Применяем соответствующую конфигурацию
     }
     
+    # Устанавливаем таймаут асинхронной сессии
     timeout = aiohttp.ClientTimeout(total=model_timeout)
+    
     response_text = None
     code_blocks_count = 0
     
-    for attempt in range(2): # 2 попытки на модель
+    # Попытка выполнить запрос к модели (с повторными попытками)
+    for attempt in range(2): # Даем 2 попытки на модель
         try:
             logger.info(f"🚀 Запрос к AI ({model_to_use.split('/')[-1]}): попытка {attempt+1}/2...")
             start_time = time.time()
             
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(OPENROUTER_URL, headers=headers, json=data) as response:
+                async with session.post(
+                    OPENROUTER_URL, 
+                    headers=headers, 
+                    json=data
+                ) as response:
+                    
                     elapsed = time.time() - start_time
+                    
                     if response.status == 200:
                         result = await response.json()
                         if 'choices' in result and result['choices']:
                             text = result['choices'][0]['message'].get('content', '').strip()
                             
+                            # Проверяем, что ответ содержательный
                             if text and len(text) > 20 and not text.isspace():
-                                # Попытка исправить отчеты с нечетным кол-вом кавычек (для кода)
+                                # --- Попытка исправить распространенные проблемы с кодом ---
+                                # (Не влияет на формулы, т.к. они теперь ASCII/Unicode)
                                 backtick_count = text.count('`')
                                 if backtick_count % 2 != 0:
-                                    logger.warning(f"⚠️ Нечётное количество кавычек ({backtick_count}) в ответе от {model_to_use.split('/')[-1]}. Попытка исправить...")
+                                    logger.warning(f"⚠️ Нечётное количество кавычек ({backtick_count}) в ответе от {model_to_use.split('/')[-1]}. Попытка исправить.")
                                     if text.count('```') % 2 != 0: # Если блок ``` не закрыт
                                         text += '\n```'
-                                    elif text.endswith('`') and text.rfind('`') == len(text)-1:
-                                        text += '`'
+                                    elif text.endswith('`') and text.rfind('`') == len(text)-1: # Если последний символ - открывающая кавычка
+                                        text += '`' # Добавляем закрывающую
                                 # --- Конец исправления ---
-                                
-                                # Считаем блоки кода
+
+                                # Считаем количество корректных блоков кода
                                 code_blocks = re.findall(r'```(?:[\w]*)\n[\s\S]*?\n```', text)
                                 code_blocks_count = len(code_blocks)
                                 
@@ -538,9 +705,11 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
                             else:
                                 logger.warning(f"⚠️ {model_to_use.split('/')[-1]} вернул некорректный ответ (слишком короткий/пустой): {len(text)} символов")
                     else:
+                        # Ответ с ошибкой от API
                         error_text = await response.text()
                         logger.warning(f"⚠️ {model_to_use.split('/')[-1]} ошибка [{response.status}]: {error_text[:200]}")
                 
+                # Если первая попытка не удалась, ждем перед второй
                 if attempt < 1:
                     wait_time = 2.0
                     logger.info(f"🔄 Повторная попытка через {wait_time} секунд...")
@@ -549,16 +718,19 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
         except asyncio.TimeoutError:
             logger.warning(f"⏱️ Таймаут при запросе к {model_to_use.split('/')[-1]} (> {model_timeout}с)")
             if attempt < 1:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(2.0) # Ждем перед повтором
         except Exception as e:
             logger.error(f"❌ Непредвиденная ошибка при работе с {model_to_use.split('/')[-1]}: {e}", exc_info=True)
             if attempt < 1:
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(2.0) # Ждем перед повтором
 
+    # Если ни одна из попыток не увенчалась успехом для выбранной AI модели
     logger.warning(f"❌ Модель {model_to_use} не сработала после 2 попыток.")
+    
+    # Переходим на локальный fallback, если AI модель полностью отказала
     logger.warning("🔁 Перехожу на локальный fallback.")
     response = get_local_fallback_response(user_question)
-    return response, "local_fallback", 0
+    return response, "local_fallback", 0 # Возвращаем локальный ответ, в нем кода нет
 
 # ==================== ЛОКАЛЬНЫЙ FALLBACK ====================
 LOCAL_RESPONSES = {
@@ -576,6 +748,7 @@ LOCAL_RESPONSES = {
         "🚀 **Ключевым является надежный механизм переключения между моделями** в случае их недоступности или низкой производительности."
     ],
     "код": [
+        # Этот блок будет заменен, если AI вернет специальный формат для файла
         "💻 **Пример кода для Telegram бота с AI-интеграцией**\n\n"
         "Ниже представлен упрощенный пример обработки пользовательского текста и отправки его AI-модели.\n\n"
         "```python\nimport asyncio\nimport aiohttp\nimport os\n\nTELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')\nOPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')\nOPENROUTER_URL = \"https://openrouter.ai/api/v1/chat/completions\"\n\nasync def fetch_ai_response(user_query):\n    if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:\n        return \"Ошибка конфигурации: API ключи не найдены.\"\n\n    headers = {\n        \"Authorization\": f\"Bearer {OPENROUTER_API_KEY}\",\n        \"Content-Type\": \"application/json\",\n        \"HTTP-Referer\": \"https://t.me/your_bot_user\", # Измените на ваш реферер\n        \"X-Title\": \"MyAiBot\"\n    }\n\n    messages = [\n        {\"role\": \"system\", \"content\": \"Ты полезный ассистент. Отвечай кратко.\"},\n        {\"role\": \"user\", \"content\": user_query}\n    ]\n\n    data = {\n        \"model\": \"google/gemini-2.5-flash-lite\", # Или другая доступная модель\n        \"messages\": messages,\n        \"max_tokens\": 500,\n        \"temperature\": 0.7\n    }\n\n    try:\n        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:\n            async with session.post(OPENROUTER_URL, headers=headers, json=data) as resp:\n                if resp.status == 200:\n                    result = await resp.json()\n                    return result['choices'][0]['message']['content'].strip()\n                else:\n                    return f\"Ошибка API: {resp.status} - {await resp.text()}\"\n    except Exception as e:\n        return f\"Ошибка запроса: {e}\"\n\n# Пример использования (вне aiogram цикла)\n# response = await fetch_ai_response(\"Как работает асинхронность в Python?\")\n# print(response)\n```\n\n"
@@ -609,7 +782,8 @@ def get_local_fallback_response(user_question: str) -> str:
     """Генерация локального ответа, если AI API недоступно."""
     question_lower = user_question.lower()
     
-    if any(word in question_lower for word in ['код', 'пример', 'программир', 'python', 'javascript', 'api', 'telegram', 'script']):
+    # Простая эвристика для выбора наиболее релевантного локального ответа
+    if any(word in question_lower for word in ['код', 'пример', 'программир', 'python', 'javascript', 'api', 'telegram', 'script', 'файл', 'создать', 'html', 'css', 'json']):
         topic = "код"
     elif any(word in question_lower for word in ['физик', 'формул', 'работа', 'гравитац', 'механик', 'энерги', 'ньютон', 'джоуль', 'электр', 'вольт', 'ампер', 'ом', 'батаре', 'напряжен', 'ток', 'сопротивлен']):
         topic = "общий"
@@ -631,6 +805,7 @@ async def cmd_start(message: types.Message):
         "• **Гибкая архитектура:** Автоматический выбор оптимальной AI-модели.\n"
         "• **Стабильная работа:** Увеличенные таймауты и система повторных попыток.\n"
         "• **Продвинутая обработка кода:** Корректная подсветка синтаксиса в Telegram.\n"
+        "• **Генерация файлов:** Могу создавать и отправлять HTML-файлы с кодом и подсветкой.\n"
         "• **Научные темы:** Ответы с использованием Unicode/ASCII для формул (в текстовом формате).\n"
         f"• **Платные модели:** {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}. Попробуйте задать сложный вопрос!\n\n"
         "⚙️ **Текущая конфигурация:**\n"
@@ -644,6 +819,7 @@ async def cmd_start(message: types.Message):
         "```python\nprint('Привет, мир!')\n```\n\n"
         "📊 Проверьте доступность AI-моделей: `/status`\n"
         "❓ Просто задайте вопрос с вопросительным знаком '?' в конце."
+        "\n💡 Чтобы получить код как файл, запросите: 'Дай мне [язык] код для [задачи] как файл' или 'Создай HTML файл с [описание]'.\n"
     )
     await send_message_safe(message.chat.id, welcome_text, message.message_id)
 
@@ -695,9 +871,9 @@ async def cmd_status(message: types.Message):
         error_text = f"❌ Произошла ошибка при проверке статуса: {str(e)[:150]}"
         await processing_msg.edit_text(error_text, parse_mode=None)
 
-@dp.message(lambda msg: msg.text and msg.text.strip().endswith('?'))
+@dp.message(lambda msg: msg.text and (msg.text.strip().endswith('?') or msg.text.strip().lower().startswith("код") or msg.text.strip().lower().startswith("создай")))
 async def handle_question(message: types.Message):
-    """Обработка пользовательских вопросов. Ответы будут в формате MarkdownV2/Plain."""
+    """Обработка пользовательских вопросов. Может отправлять обычный текст или файл с кодом."""
     user_question = message.text.strip()
     chat_id = message.chat.id
     
@@ -706,10 +882,11 @@ async def handle_question(message: types.Message):
     
     processing_msg = None
     try:
-        processing_text = "🤔 ИИ анализирует запрос..."
+        processing_text = "🤔 ИИ обрабатывает запрос..."
+        # Используем send_message_safe для первой отправки
         processing_msg = await send_message_safe(chat_id, processing_text, message.message_id)
         
-        if not processing_msg:
+        if not processing_msg: # Если даже первое сообщение не удалось отправить
             logger.warning(f"Не удалось отправить сообщение о начале обработки запроса для {chat_id}")
             return
         
@@ -720,15 +897,66 @@ async def handle_question(message: types.Message):
         elapsed = time.time() - start_time
         
         if response:
-            await processing_msg.edit_text("✅ Ответ готов! Отправляю...", parse_mode=None)
+            # --- ПРОВЕРКА НА СПЕЦИАЛЬНЫЙ ВЫВОД ФАЙЛА ОТ AI ---
+            file_output_match = re.search(rf"{FILE_OUTPUT_MARKER_START}(.*?){FILE_OUTPUT_MARKER_END}", response, re.DOTALL)
             
-            # Отправляем ответ, используя smart splitting для длинных сообщений
-            await send_long_message(
-                chat_id,
-                f"🤖 **Ответ ИИ:**\n\n{response}",
-                message.message_id
-            )
+            if file_output_match:
+                # Парсим вывод файла
+                file_output_content = file_output_match.group(1).strip()
+                
+                language = DEFAULT_CODE_LANGUAGE
+                filename = DEFAULT_CODE_FILENAME
+                code_content_lines = []
+                
+                # Парсинг строк Language: и Filename:
+                parsing_header = True # Флаг для определения, парсим ли мы заголовок или код
+                for line in file_output_content.split('\n'):
+                    stripped_line = line.strip()
+                    if stripped_line.lower().startswith("language:"):
+                        language = stripped_line.split(":", 1)[1].strip()
+                    elif stripped_line.lower().startswith("filename:"):
+                        filename = stripped_line.split(":", 1)[1].strip()
+                    elif stripped_line == "": # Пустая строка отделяет заголовок от кода
+                        parsing_header = False
+                    elif not parsing_header: # Если мы уже в блоке кода
+                        code_content_lines.append(line)
+                
+                code_content = "\n".join(code_content_lines).strip()
+
+                logger.info(f"✨ Обнаружен вывод файла: Язык='{language}', Имя='{filename}', Длина кода={len(code_content)}")
+
+                # Генерируем HTML файл
+                # Если AI сгенерировал HTML, он будет обернут как есть.
+                # Иначе, код будет обернут в HTML с подсветкой.
+                output_filename, file_data = generate_html_file_with_code(language, filename, code_content)
+                
+                # Удаляем маркеры и код из основного ответа, если они были
+                # (чтобы не отправлять их как обычный текст)
+                response_for_caption = response.replace(file_output_match.group(0), "").strip()
+                if not response_for_caption: # Если кроме файла ничего не было
+                    response_for_caption = "Сгенерировано по вашему запросу."
+
+                # Отправляем файл
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=types.BufferedInputFile(file_data.getvalue(), filename=output_filename),
+                    caption=f"💡 Ваш файл '{output_filename}' готов:\n\n{response_for_caption}",
+                    reply_to_message_id=message.message_id
+                )
+                logger.info(f"📩 Файл '{output_filename}' отправлен.")
+
+            else:
+                # --- Обычная отправка ответа (не файл) ---
+                await processing_msg.edit_text("✅ Ответ готов! Отправляю...", parse_mode=None)
+                
+                # Отправляем ответ, используя smart splitting для длинных сообщений
+                await send_long_message(
+                    chat_id,
+                    f"🤖 **Ответ ИИ:**\n\n{response}",
+                    message.message_id
+                )
             
+            # --- Обновление статусного сообщения ---
             model_name_display = model_used.split('/')[-1] if model_used != "local_fallback" else "Локальная база знаний"
             
             final_status_text = (
@@ -740,13 +968,15 @@ async def handle_question(message: types.Message):
             if code_blocks_count > 0:
                 final_status_text += f"\n💻 Код: {code_blocks_count} блок(ов) обнаружено"
             
+            # Определяем тип модели для отображения
             model_type_str = ""
             if model_used != "local_fallback":
+                # Поиск в списках конфига для определения типа
                 if model_used in MODELS_CONFIG["paid_models"]:
                     model_type_str = " (💰 Платная)"
                 elif model_used in MODELS_CONFIG["primary_free_models"] or model_used in MODELS_CONFIG["secondary_free_models"]:
                     model_type_str = " (🆓 Бесплатная)"
-                else:
+                else: # Если модель не найдена в конфигах, но не локальная
                      model_type_str = " (❔ Неизвестный тип)"
             
             final_status_text += f"\n🤖 Используемая модель: `{model_name_display}{model_type_str}`"
@@ -770,7 +1000,8 @@ async def handle_question(message: types.Message):
     except Exception as e:
         logger.error(f"❌ Критическая ошибка при обработке запроса от {username} (chat_id: {chat_id}): {e}", exc_info=True)
         try:
-            if not processing_msg:
+            # Пытаемся отправить сообщение об ошибке, если возможно
+            if not processing_msg: # Если даже первое сообщение не удалось отправить
                 await bot.send_message(chat_id=chat_id, text="❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте позже.", reply_to_message_id=message.message_id)
             else:
                 await processing_msg.edit_text("❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте позже.", parse_mode=None)
@@ -783,6 +1014,7 @@ async def main():
     logger.info("=" * 60)
     logger.info("🚀 Бот IvanIvanych запускается...")
     logger.info("🔄 ОПТИМИЗИРОВАННАЯ ВЕРСИЯ с улучшенной логикой выбора моделей.")
+    # Проверяем USE_PAID_MODELS, как оно было прочитано
     logger.info(f"💰 Платные модели: {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}")
     
     logger.info("--- Конфигурация моделей ---")
@@ -804,8 +1036,11 @@ async def main():
     logger.info("=" * 60)
     
     try:
+        # Очищаем необработанные обновления перед стартом
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("🔄 Предыдущие обновления Telegram очищены.")
+        
+        # Запускаем polling для получения обновлений
         await dp.start_polling(bot, skip_updates=True)
         
     except KeyboardInterrupt:
@@ -813,12 +1048,15 @@ async def main():
     except Exception as e:
         logger.error(f"💥 Критическая ошибка при запуске бота: {e}", exc_info=True)
     finally:
+        # Закрываем сессию бота при завершении работы
         try:
+            # Проверяем, существует ли сессия перед закрытием
             if bot and bot.session:
                 await bot.session.close()
                 logger.info("🔌 Сессия бота закрыта.")
         except Exception as e:
             logger.error(f"Ошибка при закрытии сессии бота: {e}", exc_info=True)
+
 
 if __name__ == "__main__":
     try:
