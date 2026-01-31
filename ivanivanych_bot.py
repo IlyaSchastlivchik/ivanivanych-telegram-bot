@@ -1,4 +1,4 @@
-
+```python
 import asyncio
 import logging
 import os
@@ -16,60 +16,67 @@ from aiogram.enums import ChatAction
 from dotenv import load_dotenv
 
 # ==================== НАСТРОЙКА ====================
-# Пытаемся загрузить .env явно из стандартного пути для Render Secret Files
-ENV_FILE_PATH = '/etc/secrets/.env'
+
+# ----- 1. НАСТРОЙКА ЛОГИРОВАНИЯ (ДОЛЖНА БЫТЬ ПЕРВОЙ) -----
+# Эта конфигурация должна быть выполнена до каких-либо вызовов logger.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+# Получаем экземпляр логгера. Теперь `logger` определен.
+logger = logging.getLogger(__name__)
+
+logger.info("🚀 Инициализация скрипта IvanIvanych Bot...")
+
+# ----- 2. ЗАГРУЗКА .ENV ФАЙЛА -----
+# Путь к файлу .env, который Render обычно монтирует из "Secret Files".
+ENV_FILE_PATH = '/etc/secrets/.env' 
 
 try:
+    # Пытаемся сначала загрузить .env из стандартного пути для Render Secret Files.
     if os.path.exists(ENV_FILE_PATH):
         load_dotenv(dotenv_path=ENV_FILE_PATH)
         logger.info(f"✅ Успешно загружен .env файл из {ENV_FILE_PATH}")
     else:
-        # Если файл не найден по явному пути, пробуем стандартный поиск load_dotenv()
+        # Если файл не найден там, пытаемся загрузить стандартным путем
+        # (load_dotenv() без аргумента ищет в текущей директории и родительских).
         logger.warning(f"⚠️ Файл .env не найден по пути {ENV_FILE_PATH}. Попытка загрузить стандартным путем.")
-        load_dotenv()
-        logger.info("✅ Использован стандартный поиск .env файла.")
+        
+        # Вызываем load_dotenv() без пути. Он попытается найти .env в текущей директории или выше.
+        # Если файл был найден и успешно загружен, load_dotenv() возвращает True.
+        if load_dotenv(): 
+             logger.info("✅ .env файл успешно загружен стандартным путем.")
+        else:
+             # Если и стандартный поиск не помог (файл отсутствует или пуст)
+             logger.warning("⚠️ Файл .env не найден ни в '/etc/secrets/' ни стандартным путем. Переменные окружения могут быть не установлены.")
+
 except Exception as e:
-    logger.error(f"❌ Ошибка при загрузке .env файла: {e}")
-    # Продолжаем работу, полагаясь на переменные, установленные напрямую в Render
+    # Обрабатываем возможные ошибки при доступе или чтении файла .env
+    logger.error(f"❌ Критическая ошибка при загрузке .env файла: {e}. Продолжаю работу.", exc_info=True)
+    # Скрипт продолжит работу, полагаясь на переменные, установленные напрямую в Render UI.
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger(__name__)
-
-# Проверка переменных окружения
+# ----- 3. СЧИТЫВАНИЕ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ -----
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# --- ДОПОЛНИТЕЛЬНЫЙ ДЕБАГГИНГ ---
-# Выводим значение переменной USE_PAID_MODELS, чтобы точно понять, что считывается
-raw_use_paid_models_value = os.getenv("USE_PAID_MODELS", "false") # Используем "false" как дефолт, если переменная не найдена
-logger.info(f"🌟 DEBUG: Сырое значение USE_PAID_MODELS из os.getenv: '{raw_use_paid_models_value}'")
+# --- ДОПОЛНИТЕЛЬНЫЙ ДЕБАГГИНГ для USE_PAID_MODELS ---
+# Получаем сырое строковое значение переменной USE_PAID_MODELS.
+# Если переменная не найдена, os.getenv вернет "false" (значение по умолчанию).
+use_paid_models_raw_value = os.getenv("USE_PAID_MODELS", "false") 
+logger.info(f"🌟 DEBUG: Значение USE_PAID_MODELS, считанное из окружения (или .env): '{use_paid_models_raw_value}'")
+
+# Правильно определяем флаг USE_PAID_MODELS, сравнивая строковое значение с "true" (регистронезависимо).
+USE_PAID_MODELS = use_paid_models_raw_value.lower() == "true"
+logger.info(f"🌟 DEBUG: Флаг USE_PAID_MODELS установлен в: {USE_PAID_MODELS}")
 # --- КОНЕЦ ДОПОЛНИТЕЛЬНОГО ДЕБАГГИНГА ---
 
-# Убедитесь, что ваша логика определения USE_PAID_MODELS в коде корректна
-# current_use_paid_models_flag = raw_use_paid_models_value.lower() == "true"
-# logger.info(f"🌟 DEBUG: Флаг USE_PAID_MODELS установлен в: {current_use_paid_models_flag}")
-# USE_PAID_MODELS = current_use_paid_models_flag
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger(__name__)
-
-# Проверка переменных окружения
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
+# Проверка обязательных переменных окружения после их получения.
 if not TELEGRAM_BOT_TOKEN or not OPENROUTER_API_KEY:
-    logger.error("Отсутствуют обязательные переменные в .env файле!")
-    exit(1)
+    # В случае отсутствия критически важных ключей, выводим ошибку и завершаем работу.
+    logger.error("❌ Ошибка: Отсутствуют обязательные переменные окружения (TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY). "
+                 "Пожалуйста, установите их в .env файле или настройках Render.")
+    exit(1) # Завершаем выполнение скрипта.
 
 # Конфигурация OpenRouter API
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_API_BASE_URL", "https://openrouter.ai/api/v1")
@@ -93,7 +100,7 @@ MODELS_CONFIG = {
     
     # Платные модели (пробуются, если USE_PAID_MODELS=true и ВСЕ бесплатные модели не работают)
     "paid_models": [
-        "google/gemini-2.5-flash-lite",      # Заменена Llama на Gemini Flash Lite в платном сценарии
+        "google/gemini-2.5-flash-lite",      # Используем Gemini Flash Lite как платную модель
         "deepseek/deepseek-v3",
         # Здесь можно добавить другие платные модели, если требуется
         # "openai/gpt-4-turbo", 
@@ -101,8 +108,7 @@ MODELS_CONFIG = {
     ]
 }
 
-# Флаг для разрешения использования платных моделей, берется из .env
-USE_PAID_MODELS = os.getenv("USE_PAID_MODELS", "false").lower() == "true"
+# Флаг для разрешения использования платных моделей (уже определен выше как USE_PAID_MODELS)
 
 # УВЕЛИЧЕННЫЕ таймауты (в секундах) для различных категорий моделей
 MODEL_TIMEOUTS = {
@@ -172,129 +178,174 @@ def prepare_html_message(text: str) -> str:
     """Подготовка текста для отправки в формате HTML, корректно обрабатывая блоки кода."""
     text = clean_text(text)
     
-    # Создаем копию текста для экранирования, сохраняя блоки кода
+    # Сначала экранируем весь текст, затем будем восстанавливать блоки кода, отменяя экранирование внутри них.
     escaped_text = html.escape(text)
     
-    # Восстанавливаем блоки кода, отменяя экранирование внутри них
-    def restore_code_block(match):
-        language = match.group(1) if match.group(1) else ''
-        code_content = match.group(2)
-        
-        # Отменяем экранирование внутри кода
-        code_content = code_content.replace('&lt;', '<').replace('&gt;', '>')
-        code_content = code_content.replace('&amp;', '&').replace('&quot;', '"')
-        code_content = code_content.replace('&#x27;', "'").replace('&#x2F;', '/')
-        
-        if language:
-            return f'<pre><code class="language-{language}">{code_content}</code></pre>'
-        else:
-            return f'<pre><code>{code_content}</code></pre>'
-    
-    # Сначала экранируем весь текст, затем восстанавливаем блоки кода
-    # Замена ```(...)``` на временный маркер, чтобы не затронуть внутренний HTML
-    
-    # Находим блоки кода, экранируем их контент, а затем оборачиваем в <pre><code>
-    # Используем регулярное выражение, чтобы найти блоки кода с языком или без
-    # Сохраняем оригинальные блоки кода, чтобы потом заменить экранированные версии
-    code_blocks_map = {}
-    def placeholder_code_block(match):
-        key = f"__CODE_BLOCK_{len(code_blocks_map)}__"
-        code_blocks_map[key] = match.group(0) # Сохраняем оригинальный блок
-        return key
-        
-    # Сначала заменяем блоки кода на плейсхолдеры
-    text_with_placeholders = re.sub(r'(```(\w*)\n)([\s\S]*?)(\n```)', placeholder_code_block, text)
-    
-    # Далее экранируем остальной текст
-    escaped_text_with_placeholders = html.escape(text_with_placeholders)
-    
-    # Восстанавливаем блоки кода, применяя экранирование только к их содержимому, если оно было
-    # Этот подход сложен, проще сначала экранировать всё, а потом восстановить код, отменяя экранирование внутри кода.
-
-    # Повторный подход: экранируем весь текст, затем восстанавливаем код
-    # Заменим блоки ```code``` на временные маркеры, затем экранируем, затем восстанавливаем код, отменяя экранирование внутри.
-    
-    # Работаем с экранированным текстом, но будем восстанавливать код.
-    # Найдем блоки кода в *оригинальном* тексте, чтобы понять их структуру
+    # Используем регулярное выражение для поиска блоков кода в исходном тексте.
     code_section_pattern = r'(```(\w*)\n)([\s\S]*?)(\n```)'
     
-    processed_text = text
+    processed_text = escaped_text
     
-    # Храним пары: `(начало_блока_экранированного_текста, конец_блока_экранированного_текста, содержимое_кода)`
-    code_segments = []
-    for match in re.finditer(code_section_pattern, processed_text):
+    # Перед тем как начать заменять, соберем все блоки кода и их контент
+    code_segments_to_restore = []
+    for match in re.finditer(code_section_pattern, text): # Ищем в оригинальном тексте
         lang_part = match.group(1) # ```lang\n
         code_content = match.group(3)
         end_part = match.group(4) # \n```
         
-        # Экранируем содержимое кода, чтобы потом отменить экранирование
-        escaped_code = html.escape(code_content)
-        
-        # Отменяем экранирование внутри кода
-        restored_code = escaped_code.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-        restored_code = restored_code.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
-        
-        # Полностью экранируем весь текст, затем заменяем части кода
-        
-        # Удалим оригинальный блок кода, чтобы избежать двойного экранирования
-        processed_text = processed_text.replace(match.group(0), '')
-
-    # Экранируем оставшийся текст
-    processed_text = html.escape(processed_text)
-    
-    # Теперь восстановим блоки кода
-    for match in re.finditer(code_section_pattern, text): # Ищем в оригинальном тексте, чтобы получить контент
-        lang_part = match.group(1)
-        code_content = match.group(3)
-        end_part = match.group(4)
-        
-        # Повторно отменяем экранирование для кода, уже будучи уверенными, что остальной текст экранирован
+        # Отменяем экранирование для контента кода.
+        # Это важно, потому что html.escape мог экранировать '<', '>', '&' внутри кода.
         restored_code = code_content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
         restored_code = restored_code.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
         
-        if match.group(2): # Если есть язык
+        # Создаем HTML-представление блока кода.
+        if match.group(2): # Если указан язык программирования
              html_code_block = f'<pre><code class="language-{match.group(2)}">{restored_code}</code></pre>'
-        else:
+        else: # Без указания языка
              html_code_block = f'<pre><code>{restored_code}</code></pre>'
         
-        # Заменяем плейсхолдеры на реальные блоки кода
-        processed_text = processed_text.replace(html.escape(match.group(0)), html_code_block)
+        # Заменяем оригинальный блок кода в экранированном тексте на его HTML-представление.
+        # Это требует аккуратности, чтобы не затронуть уже экранированный текст.
+        # Проще всего заменить оригинальный блок кода на плейсхолдер, а затем заменить плейсхолдер на HTML.
+        code_segments_to_restore.append((match.group(0), html_code_block))
+
+    # Теперь проходим по собранным сегментам и заменяем в экранированном тексте.
+    # Важно делать это в порядке, обратном вхождению, чтобы не нарушить индексы.
+    # Или просто заменять, если регулярка достаточно точна.
+    # Для простоты, заменим каждый найденный оригинальный блок кода на его HTML-представление.
     
-    # Обработка inline кода
-    def restore_inline_code(match):
-        code_content = match.group(1)
-        # Отменяем экранирование внутри кода
-        code_content = code_content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
-        code_content = code_content.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
-        return f'<code>{code_content}</code>'
+    # Ищем в оригинальном тексте, но заменяем в `processed_text` (который уже экранирован)
+    # Более безопасный способ: найти все совпадения в оригинальном тексте,
+    # затем заменить соответствующий экранированный кусок.
     
-    # Используем временные маркеры для inline кода, чтобы не перезатирать внутри блоков <pre><code>
-    inline_code_map = {}
+    # Альтернативный подход: Заменить блоки кода на маркеры, затем экранировать, затем восстановить.
+    
+    # Ищем блоки кода, чтобы заменить их плейсхолдерами
+    code_blocks_placeholder_map = {}
+    def placeholder_code_block(match):
+        key = f"__CODE_BLOCK_{len(code_blocks_placeholder_map)}__"
+        code_blocks_placeholder_map[key] = match.group(0) # Сохраняем оригинальный блок
+        return key
+    
+    # Сначала заменяем все тройные блоки кода на плейсхолдеры
+    text_with_placeholders = re.sub(code_section_pattern, placeholder_code_block, text)
+    
+    # Затем экранируем оставшийся текст
+    escaped_text_with_placeholders = html.escape(text_with_placeholders)
+    
+    # Теперь восстанавливаем блоки кода, превращая их в HTML
+    final_html_text = escaped_text_with_placeholders
+    for key, original_code_block in code_blocks_placeholder_map.items():
+        # Извлекаем контент кода и язык из оригинального блока
+        match = re.match(code_section_pattern, original_code_block)
+        if match:
+            lang = match.group(2)
+            code_content = match.group(3)
+            
+            # Отменяем экранирование внутри кода
+            restored_code = code_content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+            restored_code = restored_code.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
+            
+            if lang:
+                html_code_block = f'<pre><code class="language-{lang}">{restored_code}</code></pre>'
+            else:
+                html_code_block = f'<pre><code>{restored_code}</code></pre>'
+            
+            # Заменяем плейсхолдер на готовый HTML блок
+            final_html_text = final_html_text.replace(key, html_code_block)
+
+    # Обработка inline кода: `code`
+    # Сначала экранируем весь текст, включая inline код
+    processed_inline_text = html.escape(text)
+    
+    # Затем находим inline код в *экранированном* тексте и восстанавливаем его
+    # Это сложно. Проще сначала обработать блоки кода, потом inline код.
+    
+    # Новый подход для inline кода:
+    # Найти inline код в *оригинальном* тексте, экранировать его контент,
+    # а затем обернуть в <code>.
+    # Сначала заменим inline коды на плейсхолдеры
+    inline_code_placeholder_map = {}
     def placeholder_inline_code(match):
+        key = f"__INLINE_CODE_{len(inline_code_placeholder_map)}__"
+        inline_code_placeholder_map[key] = match.group(1) # Сохраняем контент inline кода
+        return key
+
+    # Используем тот же 'text' (исходный), чтобы найти inline код.
+    # Заменяем inline код на плейсхолдеры.
+    text_with_inline_placeholders = re.sub(r'`(.*?)`', placeholder_inline_code, text)
+    
+    # Экранируем теперь этот текст, но плейсхолдеры останутся как есть.
+    escaped_text_with_inline_placeholders = html.escape(text_with_inline_placeholders)
+    
+    # Восстанавливаем inline код
+    final_text_with_inline = escaped_text_with_inline_placeholders
+    for key, inline_content in inline_code_placeholder_map.items():
+        # Отменяем экранирование для контента inline кода
+        restored_inline_content = inline_content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+        restored_inline_content = restored_inline_content.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
+        
+        # Создаем HTML для inline кода
+        html_inline_code = f'<code>{restored_inline_content}</code>'
+        # Заменяем плейсхолдер на HTML
+        final_text_with_inline = final_text_with_inline.replace(key, html_inline_code)
+
+    # Объединяем обработку блоков кода и inline кода
+    # В данном случае, сначала обработали блоки кода, затем inline.
+    # Если inline код может входить в блоки кода, это может вызвать проблемы.
+    # safest approach: process blocks, then process inline code in the remaining text.
+
+    # Итоговый текст - это текст с восстановленными блоками кода
+    # и восстановленными inline-кодами.
+    
+    # Перепроверим логику. Проще всего:
+    # 1. Заменить ```...``` на плейсхолдеры.
+    # 2. Заменить `...` на плейсхолдеры.
+    # 3. Экранировать весь оставшийся текст.
+    # 4. Восстановить блоки кода из плейсхолдеров, отменяя экранирование внутри.
+    # 5. Восстановить inline код из плейсхолдеров, отменяя экранирование внутри.
+    
+    # 1. Плейсхолдеры для блоков кода
+    code_block_map = {}
+    def save_code_block(match):
+        key = f"__CODE_BLOCK_{len(code_block_map)}__"
+        code_block_map[key] = match.group(0)
+        return key
+    text_with_placeholders = re.sub(code_section_pattern, save_code_block, text)
+    
+    # 2. Плейсхолдеры для inline кода
+    inline_code_map = {}
+    def save_inline_code(match):
         key = f"__INLINE_CODE_{len(inline_code_map)}__"
         inline_code_map[key] = match.group(1) # Сохраняем контент
         return key
-
-    # Экранируем текст, но оставляем inline код без экранирования для `html.escape`
-    # Это может быть сложно. Проще сначала заменить все блоки `...` на маркеры,
-    # затем экранировать остальное, затем восстановить.
+    text_with_placeholders = re.sub(r'`(.*?)`', save_inline_code, text_with_placeholders)
     
-    # Новый подход для inline кода:
-    processed_text = re.sub(r'`(.*?)`', lambda m: f'`{html.escape(m.group(1))}`', processed_text)
+    # 3. Экранируем текст
+    escaped_text = html.escape(text_with_placeholders)
     
-    # Восстанавливаем inline код
-    def restore_escaped_inline_code(match):
-        escaped_content = match.group(1)
-        if escaped_content:
-            # Отменяем экранирование
-            restored_content = escaped_content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+    # 4. Восстанавливаем блоки кода
+    final_html = escaped_text
+    for key, original_block in code_block_map.items():
+        match = re.match(code_section_pattern, original_block)
+        if match:
+            lang = match.group(2)
+            content = match.group(3)
+            restored_content = content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
             restored_content = restored_content.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
-            return f'<code>{restored_content}</code>'
-        return '<code></code>' # Пустой inline код
+            
+            html_block = f'<pre><code class="language-{lang}">{restored_content}</code></pre>' if lang else f'<pre><code>{restored_content}</code></pre>'
+            final_html = final_html.replace(key, html_block)
+
+    # 5. Восстанавливаем inline код
+    for key, inline_content in inline_code_map.items():
+        restored_content = inline_content.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+        restored_content = restored_content.replace('&quot;', '"').replace('&#x27;', "'").replace('&#x2F;', '/')
         
-    processed_text = re.sub(r'`(.*?)`', restore_escaped_inline_code, processed_text)
-    
-    return processed_text
+        html_inline = f'<code>{restored_content}</code>'
+        final_html = final_html.replace(key, html_inline)
+        
+    return final_html
 
 def prepare_markdown_message(text: str) -> str:
     """Подготовка текста для отправки в формате MarkdownV2."""
@@ -314,15 +365,12 @@ def prepare_markdown_message(text: str) -> str:
         inline_codes.append(match.group(0))
         return f"__INLINE_CODE_{len(inline_codes)-1}__"
     
-    # Затем заменяем одинарные блоки кода
+    # Затем заменяем одинарные блоки кода, используя текст с уже замененными тройными блоками
     text_with_placeholders = re.sub(r'`[^`\n]+`', save_inline_code, text_with_placeholders)
     
     # Экранируем специальные символы MarkdownV2
     # Список символов, которые нужно экранировать в MarkdownV2
     chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    # Добавляем символы, которые могут быть частью URL или ссылок, но не должны быть интерпретированы
-    # (например, если они находятся в тексте, который не является ссылкой)
-    # В целом, лучше экранировать все, чтобы избежать неожиданной интерпретации.
     
     for char in chars_to_escape:
         text_with_placeholders = text_with_placeholders.replace(char, '\\' + char)
@@ -350,12 +398,14 @@ async def send_message_safe(chat_id: int, text: str, reply_to_message_id: int = 
         # Сначала пытаемся отправить в HTML
         html_text = prepare_html_message(text)
         # Проверка на слишком длинный HTML (Telegram имеет лимит ~4096 символов)
+        # Максимальная длина сообщения Telegram 4096 символов.
+        # HTML может быть немного длиннее из-за тегов, поэтому берем с запасом.
         if len(html_text) > 4000: 
-            raise ValueError("HTML слишком длинный")
+            raise ValueError("HTML слишком длинный для отправки.")
         kwargs["text"] = html_text
         kwargs["parse_mode"] = "HTML"
         result = await bot.send_message(**kwargs)
-        logger.info(f"✅ Сообщение отправлено с HTML (chat_id: {chat_id}), длина: {len(text)} символов")
+        logger.info(f"✅ Сообщение отправлено с HTML (chat_id: {chat_id}), длина: {len(text)} символов (HTML: {len(html_text)}).")
         return result
         
     except Exception as e:
@@ -364,13 +414,13 @@ async def send_message_safe(chat_id: int, text: str, reply_to_message_id: int = 
         try:
             # Пробуем MarkdownV2
             markdown_text = prepare_markdown_message(text)
-            # Проверка на слишком длинный Markdown
+            # Проверка на слишком длинный MarkdownV2
             if len(markdown_text) > 4000:
-                raise ValueError("MarkdownV2 слишком длинный")
+                raise ValueError("MarkdownV2 слишком длинный для отправки.")
             kwargs["text"] = markdown_text
             kwargs["parse_mode"] = "MarkdownV2"
             result = await bot.send_message(**kwargs)
-            logger.info(f"✅ Сообщение отправлено с MarkdownV2 (chat_id: {chat_id}), длина: {len(text)} символов")
+            logger.info(f"✅ Сообщение отправлено с MarkdownV2 (chat_id: {chat_id}), длина: {len(text)} символов (MD: {len(markdown_text)}).")
             return result
             
         except Exception as e2:
@@ -381,18 +431,18 @@ async def send_message_safe(chat_id: int, text: str, reply_to_message_id: int = 
                 cleaned_text = clean_text(text)
                 # Проверка на слишком длинный текст без форматирования
                 if len(cleaned_text) > 4096:
-                    # Если даже простой текст слишком длинный, его нужно разбивать
-                    # Это обработается в send_long_message, здесь мы можем только дать понять, что проблема
-                     raise ValueError("Простой текст сообщения слишком длинный")
+                    # Если даже простой текст слишком длинный, его нужно разбивать.
+                    # Это функция send_long_message, здесь мы лишь сигнализируем о проблеме.
+                     raise ValueError("Простой текст сообщения слишком длинный для отправки.")
                 
                 kwargs["text"] = cleaned_text
-                kwargs["parse_mode"] = None
+                kwargs["parse_mode"] = None # Отключаем парсинг
                 result = await bot.send_message(**kwargs)
-                logger.info(f"✅ Сообщение отправлено без форматирования (chat_id: {chat_id}), длина: {len(text)} символов")
+                logger.info(f"✅ Сообщение отправлено без форматирования (chat_id: {chat_id}), длина: {len(text)} символов (Plain: {len(cleaned_text)}).")
                 return result
                 
             except Exception as e3:
-                logger.error(f"❌ Не удалось отправить сообщение для chat_id {chat_id}: {e3}")
+                logger.error(f"❌ Не удалось отправить сообщение для chat_id {chat_id}: {e3}", exc_info=True)
                 return None
 
 def split_message_smart(text: str, max_length: int = 3500) -> List[str]:
@@ -515,7 +565,7 @@ async def test_model_speed(model: str) -> Tuple[bool, float]:
                 
                 if response.status == 200:
                     # Успешный ответ, модель доступна
-                    logger.debug(f"  ✅ Тест модели {model.split('/')[-1]}: OK (за {elapsed:.2f}с)")
+                    # logger.debug(f"  ✅ Тест модели {model.split('/')[-1]}: OK (за {elapsed:.2f}с)") # DEBUG level, можно раскомментировать для отладки
                     return True, elapsed
                 else:
                     # Модель недоступна или вернула ошибку
@@ -537,7 +587,7 @@ def get_model_timeout(model: str) -> int:
     if "phi-3.5" in model_lower or "qwen-2.5-7b" in model_lower or "gemini-2.5-flash-lite" in model_lower:
         return MODEL_TIMEOUTS["fast"]
     # Средние модели
-    elif "qwen2.5-32b" in model_lower or "coder" in model_lower:
+    elif "qwen2.5-32b" in model_lower or "mistral-7b" in model_lower: # Добавил mistral-7b сюда
         return MODEL_TIMEOUTS["medium"]
     # Медленные модели (большие, ресурсоемкие)
     elif "llama" in model_lower or "70b" in model_lower:
@@ -554,7 +604,7 @@ async def get_available_models() -> Dict[str, List[Tuple[str, float]]]:
     Собирает и тестирует все доступные модели, категоризируя их по типу.
     Возвращает словарь: {'primary_free': [...], 'secondary_free': [...], 'paid': [...]}
     """
-    logger.info("🔍 Проверяю доступность моделей...")
+    logger.info("🔍 Проверяю доступность AI-моделей...")
     
     models_to_check = {
         'primary_free': MODELS_CONFIG["primary_free_models"],
@@ -567,13 +617,24 @@ async def get_available_models() -> Dict[str, List[Tuple[str, float]]]:
         'secondary_free': [],
         'paid': []
     }
+    
+    # Собираем все модели для профилирования
+    all_models_for_test = []
+    for model_list in models_to_check.values():
+        all_models_for_test.extend(model_list)
+    
+    # Создаем список задач для тестирования моделей параллельно
+    tasks = [test_model_speed(model) for model in all_models_for_test]
+    results = await asyncio.gather(*tasks)
 
-    # Сначала тестируем все типы моделей, чтобы знать, какие доступны
+    # Распределяем результаты по категориям
+    model_index = 0
     for category, model_list in models_to_check.items():
         for model in model_list:
-            is_available, speed = await test_model_speed(model)
+            is_available, speed = results[model_index]
             if is_available:
                 available_models_grouped[category].append((model, speed))
+            model_index += 1
 
     # Сортируем каждую категорию по скорости (от самой быстрой к самой медленной)
     for category in available_models_grouped:
@@ -581,7 +642,7 @@ async def get_available_models() -> Dict[str, List[Tuple[str, float]]]:
 
     # Логирование результатов проверки
     total_available = sum(len(v) for v in available_models_grouped.values())
-    logger.info(f"✅ Найдено {total_available} доступных моделей:")
+    logger.info(f"✅ Найдено {total_available} доступных AI-моделей:")
     for category, models in available_models_grouped.items():
         if models:
             model_names = [m[0].split('/')[-1] for m in models]
@@ -711,7 +772,7 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
                                     # Попытка добавить закрывающие кавычки, если они явно отсутствуют
                                     if cleaned_text.count('```') % 2 != 0: # Если блок ``` не закрыт
                                         cleaned_text += '\n```'
-                                    elif cleaned_text.endswith('`'): # Если последний символ - открывающая кавычка
+                                    elif cleaned_text.endswith('`') and text.rfind('`') == len(text)-1: # Если последний символ - открывающая кавычка
                                         cleaned_text += '`' # Добавляем закрывающую
                                 # --- Конец коррекции ---
 
@@ -739,7 +800,7 @@ async def get_ai_response(user_question: str) -> Tuple[Optional[str], Optional[s
             if attempt < 1:
                 await asyncio.sleep(2.0) # Ждем перед повтором
         except Exception as e:
-            logger.error(f"❌ Непредвиденная ошибка при работе с {model_to_use.split('/')[-1]}: {e}")
+            logger.error(f"❌ Непредвиденная ошибка при работе с {model_to_use.split('/')[-1]}: {e}", exc_info=True)
             if attempt < 1:
                 await asyncio.sleep(2.0) # Ждем перед повтором
 
@@ -852,83 +913,48 @@ async def cmd_status(message: types.Message):
     try:
         logger.info("🔍 Запуск проверки моделей для команды /status...")
         
-        # Структурируем отчет по категориям моделей
-        status_report = "📊 **Статус AI-моделей:**\n\n"
-        
-        # Извлекаем категории и модели из конфига
-        model_categories = [
-            ("Основные бесплатные", MODELS_CONFIG["primary_free_models"]),
-            ("Вторичные бесплатные", MODELS_CONFIG["secondary_free_models"]),
-        ]
-        
-        if USE_PAID_MODELS:
-            model_categories.append(("Платные", MODELS_CONFIG["paid_models"]))
-        
-        # Тестируем каждую модель и добавляем результат в отчет
-        all_tested_models = []
-        for category_name, models in model_categories:
-            status_report += f"**{category_name}:**\n"
-            if not models:
-                status_report += "  - Нет моделей для проверки.\n\n"
-                continue
-            
-            # Тестируем модели в данной категории
-            for model in models:
-                is_available, speed = await test_model_speed(model)
-                emoji = "✅" if is_available else "❌"
-                name_short = model.split('/')[-1] # Сокращенное имя модели
-                
-                all_tested_models.append((model, is_available, speed)) # Собираем для финального списка
-                
-                status_report += f"{emoji} `{name_short}` ({speed:.1f}с)" if is_available else f"{emoji} `{name_short}` (недоступна)"
-                status_report += "\n"
-            status_report += "\n" # Пустая строка между категориями
-
-        # Тестируем все модели для отображения общего списка и сортировки
         # Получаем все доступные модели и их скорость
         available_models_data = await get_available_models() # Это уже делает тестирование
         
         # Формируем сводный отчет
-        status_report_summary = "📊 **Сводный статус AI-моделей:**\n\n"
+        status_report = "📊 **Сводный статус AI-моделей:**\n\n"
         
-        try:
-            # Сначала основные бесплатные
-            for model, speed in available_models_data.get('primary_free', []):
-                status_report_summary += f"✅ `{model.split('/')[-1]}` (Бесплатная, {speed:.1f}с)\n"
-            # Затем вторичные бесплатные
-            for model, speed in available_models_data.get('secondary_free', []):
-                status_report_summary += f"✅ `{model.split('/')[-1]}` (Бесплатная, {speed:.1f}с)\n"
-            # Затем платные
-            if USE_PAID_MODELS:
-                for model, speed in available_models_data.get('paid', []):
-                    status_report_summary += f"✅ `{model.split('/')[-1]}` (Платная, {speed:.1f}с)\n"
-            
-            # Отмечаем те, что не удалось протестировать (не попали в доступные)
-            tested_models_set = set([m[0] for cat_models in available_models_data.values() for m in cat_models])
-            all_config_models = set(
-                MODELS_CONFIG["primary_free_models"] +
-                MODELS_CONFIG["secondary_free_models"] +
-                (MODELS_CONFIG["paid_models"] if USE_PAID_MODELS else [])
-            )
-            for model in all_config_models:
-                if model not in tested_models_set:
-                    status_report_summary += f"❌ `{model.split('/')[-1]}` (недоступна)\n"
+        # Конкатенируем и сортируем все модели для удобного отображения
+        all_available_models_flat = []
+        for category, models in available_models_data.items():
+            for model, speed in models:
+                model_type = "Платная" if category == 'paid' else "Бесплатная"
+                all_available_models_flat.append((model, speed, model_type))
+        
+        # Сортируем по скорости (быстрее - выше)
+        all_available_models_flat.sort(key=lambda x: x[1])
 
-        except Exception as error_in_report:
-            logger.error(f"Ошибка при формировании сводного отчета: {error_in_report}")
-            status_report_summary += "❌ Ошибка при формировании детального статуса.\n"
+        # Отображаем доступные модели
+        for model, speed, model_type in all_available_models_flat:
+            status_report += f"✅ `{model.split('/')[-1]}` ({model_type}, {speed:.1f}с)\n"
         
-        status_report_summary += "\n"
+        # Отмечаем те, что были в конфиге, но не попали в доступные
+        tested_models_set = set([m[0] for m in all_available_models_flat])
+        all_config_models = set(
+            MODELS_CONFIG["primary_free_models"] +
+            MODELS_CONFIG["secondary_free_models"] +
+            (MODELS_CONFIG["paid_models"] if USE_PAID_MODELS else [])
+        )
+        for model in all_config_models:
+            if model not in tested_models_set:
+                status_report += f"❌ `{model.split('/')[-1]}` (недоступна)\n"
+
+        status_report += "\n"
         
         # Добавляем информацию о таймаутах
-        status_report_summary += f"⏱️ **Таймауты (сек):** Быстрые={MODEL_TIMEOUTS['fast']}, Средние={MODEL_TIMEOUTS['medium']}, Медленные={MODEL_TIMEOUTS['slow']}, Платные={MODEL_TIMEOUTS['paid']}\n"
-        status_report_summary += f"💰 **Платные модели:** {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}"
+        status_report += f"⏱️ **Таймауты (сек):** Быстрые={MODEL_TIMEOUTS['fast']}, Средние={MODEL_TIMEOUTS['medium']}, Медленные={MODEL_TIMEOUTS['slow']}, Платные={MODEL_TIMEOUTS['paid']}\n"
+        status_report += f"💰 **Платные модели:** {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}"
         
         # Редактируем изначальное сообщение для отображения полного отчета
-        await processing_msg.edit_text(status_report_summary, parse_mode="HTML")
+        await processing_msg.edit_text(status_report, parse_mode="HTML")
             
     except Exception as e:
-        logger.error(f"❌ Ошибка при проверке статуса моделей: {e}")
+        logger.error(f"❌ Ошибка при проверке статуса моделей: {e}", exc_info=True)
         error_text = f"❌ Произошла ошибка при проверке статуса: {str(e)[:150]}"
         await processing_msg.edit_text(error_text, parse_mode=None)
 
@@ -990,11 +1016,11 @@ async def handle_question(message: types.Message):
             # Определяем тип модели для отображения
             model_type_str = ""
             if model_used != "local_fallback":
-                model_lower = model_used.lower()
-                if any(paid_model in model_lower for paid_model in ["deepseek-v3", "gpt-4", "claude-3", "gpt-3.5-turbo"]):
+                # Поиск в списках конфига для определения типа
+                if model_used in MODELS_CONFIG["paid_models"]:
                     model_type_str = " (💰 Платная)"
-                elif any(free_model in model_used for free_model in MODELS_CONFIG["primary_free_models"] + MODELS_CONFIG["secondary_free_models"]):
-                     model_type_str = " (🆓 Бесплатная)"
+                elif model_used in MODELS_CONFIG["primary_free_models"] or model_used in MODELS_CONFIG["secondary_free_models"]:
+                    model_type_str = " (🆓 Бесплатная)"
                 else: # Если модель не найдена в конфигах, но не локальная
                      model_type_str = " (❔ Неизвестный тип)"
             
@@ -1027,7 +1053,7 @@ async def handle_question(message: types.Message):
             else:
                 await processing_msg.edit_text("❌ Произошла непредвиденная ошибка. Пожалуйста, попробуйте позже.", parse_mode=None)
         except Exception as e2:
-            logger.error(f"❌ Не удалось отправить сообщение об ошибке: {e2}")
+            logger.error(f"❌ Не удалось отправить сообщение об ошибке: {e2}", exc_info=True)
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
@@ -1075,7 +1101,7 @@ async def main():
                 await bot.session.close()
                 logger.info("🔌 Сессия бота закрыта.")
         except Exception as e:
-            logger.error(f"Ошибка при закрытии сессии бота: {e}")
+            logger.error(f"Ошибка при закрытии сессии бота: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
@@ -1085,3 +1111,4 @@ if __name__ == "__main__":
         logger.info("👋 Завершение работы программы.")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка при запуске asyncio: {e}", exc_info=True)
+```
