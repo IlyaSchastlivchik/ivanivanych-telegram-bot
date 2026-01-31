@@ -1,6 +1,3 @@
-Конечно, вот полностью исправленная версия кода, включающая исправление ошибки `NameError` и предыдущие улучшения для отправки одиночных файлов и ZIP-архивов.
-
-```python
 import asyncio
 import logging
 import os
@@ -874,6 +871,7 @@ async def cmd_status(message: types.Message):
         error_text = f"❌ Произошла ошибка при проверке статуса: {str(e)[:150]}"
         await processing_msg.edit_text(error_text, parse_mode=None)
 
+# This lambda function is intended to catch messages that are questions or requests for code.
 @dp.message(lambda msg: msg.text and (
     msg.text.strip().endswith('?') or 
     msg.text.strip().lower().startswith("код") or 
@@ -952,6 +950,7 @@ async def handle_question(message: types.Message):
                             for root, dirs, files_in_dir in os.walk(folder_path):
                                 for file_ in files_in_dir:
                                     file_path = os.path.join(root, file_)
+                                    # Важно: сохраняем относительный путь, чтобы структура сохранилась в ZIP
                                     zipf.write(file_path, os.path.relpath(file_path, folder_path))
                         
                         logger.info(f"ZIP архив '{os.path.basename(zip_filepath)}' создан.")
@@ -990,16 +989,16 @@ async def handle_question(message: types.Message):
                     filename = DEFAULT_CODE_FILENAME
                     code_content_lines = []
                     
-                    parsing_header = True
+                    parsing_header = True # Флаг для определения, парсим ли мы заголовок или код
                     for line in file_output_content.split('\n'):
                         stripped_line = line.strip()
                         if stripped_line.lower().startswith("language:"):
                             language = stripped_line.split(":", 1)[1].strip()
                         elif stripped_line.lower().startswith("filename:"):
                             filename = stripped_line.split(":", 1)[1].strip()
-                        elif stripped_line == "":
+                        elif stripped_line == "": # Пустая строка отделяет заголовок от кода
                             parsing_header = False
-                        elif not parsing_header:
+                        elif not parsing_header: # Если мы уже в блоке кода
                             code_content_lines.append(line)
                     
                     code_content = "\n".join(code_content_lines).strip()
@@ -1038,6 +1037,7 @@ async def handle_question(message: types.Message):
             if code_blocks_count > 0:
                 final_status_text += f"\n💻 Код: {code_blocks_count} блок(ов) обнаружено"
             
+            # Определяем тип модели для отображения
             model_type_str = ""
             if model_used != "local_fallback":
                 if model_used in MODELS_CONFIG["paid_models"]:
@@ -1131,4 +1131,3 @@ if __name__ == "__main__":
         logger.info("👋 Завершение работы программы.")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка при запуске asyncio: {e}", exc_info=True)
-```
