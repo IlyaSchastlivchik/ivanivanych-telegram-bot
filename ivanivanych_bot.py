@@ -18,6 +18,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ChatAction
 from dotenv import load_dotenv
+from aiogram.exceptions import TelegramBadRequest # Импортируем для обработки ошибок
 
 # ==================== НАСТРОЙКА ====================
 
@@ -955,22 +956,43 @@ async def handle_question(message: types.Message):
                         
                         logger.info(f"ZIP архив '{os.path.basename(zip_filepath)}' создан.")
 
+                        # --- Обработка длинной подписи для ZIP ---
+                        caption_text_raw = response.replace(package_output_match.group(0), "").strip()
+                        prefix = f"Archive with your files: `{os.path.basename(zip_filepath)}`\n"
+                        max_caption_len = 1024
+                        
                         await processing_msg.edit_text("⬆️ Отправляю архив с файлами...", parse_mode=None)
-                        
-                        caption_text = response.replace(package_output_match.group(0), "").strip()
-                        if not caption_text: caption_text = "Ваш архив с файлами готов!"
-                        
-                        await bot.send_document(
-                            chat_id=chat_id,
-                            document=types.FSInputFile(zip_filepath),
-                            caption=f"Архив с вашими файлами: `{os.path.basename(zip_filepath)}`\n{caption_text}",
-                            reply_to_message_id=message.message_id
-                        )
-                        logger.info(f"ZIP архив '{os.path.basename(zip_filepath)}' отправлен.")
+
+                        if len(prefix) + len(caption_text_raw) > max_caption_len:
+                            # Отправляем полное пояснение отдельно
+                            await send_long_message(chat_id, f"ℹ️ **Пояснение к архиву:**\n{caption_text_raw}", message.message_id)
+                            # Отправляем ZIP с коротким сообщением
+                            await bot.send_document(
+                                chat_id=chat_id,
+                                document=types.FSInputFile(zip_filepath),
+                                caption="📁 Archive ready. Full explanation sent separately.",
+                                reply_to_message_id=message.message_id
+                            )
+                            logger.info(f"ZIP архив '{os.path.basename(zip_filepath)}' отправлен с укороченным заголовком, пояснение отправлено отдельно.")
+                        else:
+                            # Подпись помещается, отправляем как обычно
+                            await bot.send_document(
+                                chat_id=chat_id,
+                                document=types.FSInputFile(zip_filepath),
+                                caption=f"{prefix}{caption_text_raw}",
+                                reply_to_message_id=message.message_id
+                            )
+                            logger.info(f"ZIP архив '{os.path.basename(zip_filepath)}' отправлен с полным заголовком.")
                         
                 except json.JSONDecodeError:
                     logger.error("Ошибка декодирования JSON из вывода пакета файлов.")
                     await processing_msg.edit_text("❌ Ошибка: Не удалось разобрать данные для пакета файлов.", parse_mode=None)
+                except TelegramBadRequest as e: # Обработка специфических ошибок Telegram
+                    logger.error(f"❌ Ошибка Telegram при отправке ZIP: {e}")
+                    if "Bad Request: message caption is too long" in str(e):
+                         await processing_msg.edit_text("❌ Ошибка: Пояснение к файлам слишком длинное для подписи. Отправлено отдельным сообщением.", parse_mode=None)
+                    else:
+                         await processing_msg.edit_text(f"❌ Произошла ошибка Telegram: {str(e)[:150]}", parse_mode=None)
                 except Exception as e:
                     logger.error(f"❌ Ошибка при обработке пакета файлов: {e}", exc_info=True)
                     await processing_msg.edit_text(f"❌ Произошла ошибка при создании архива: {str(e)[:150]}", parse_mode=None)
@@ -1005,16 +1027,31 @@ async def handle_question(message: types.Message):
 
                     output_html_filename, file_data = generate_html_file_with_code(language, filename, code_content)
                     
-                    caption_text = response.replace(file_output_match.group(0), "").strip()
-                    if not caption_text: caption_text = "Ваш файл с подсвеченным кодом готов!"
+                    # --- Обработка длинной подписи для одиночного файла ---
+                    caption_text_raw = response.replace(file_output_match.group(0), "").strip()
+                    prefix = f"Your file '{output_html_filename}' is ready:\n"
+                    max_caption_len = 1024
 
-                    await bot.send_document(
-                        chat_id=chat_id,
-                        document=types.BufferedInputFile(file_data.getvalue(), filename=output_html_filename),
-                        caption=f"Ваш файл '{output_html_filename}' готов:\n{caption_text}",
-                        reply_to_message_id=message.message_id
-                    )
-                    logger.info(f"Файл '{output_html_filename}' отправлен.")
+                    if len(prefix) + len(caption_text_raw) > max_caption_len:
+                        # Отправляем полное пояснение отдельно
+                        await send_long_message(chat_id, f"ℹ️ **Пояснение к файлу:**\n{caption_text_raw}", message.message_id)
+                        # Отправляем файл с коротким сообщением
+                        await bot.send_document(
+                            chat_id=chat_id,
+                            document=types.BufferedInputFile(file_data.getvalue(), filename=output_html_filename),
+                            caption="📄 File ready. Full explanation sent separately.",
+                            reply_to_message_id=message.message_id
+                        )
+                        logger.info(f"Файл '{output_html_filename}' отправлен с укороченным заголовком, пояснение отправлено отдельно.")
+                    else:
+                        # Подпись помещается, отправляем как обычно
+                        await bot.send_document(
+                            chat_id=chat_id,
+                            document=types.BufferedInputFile(file_data.getvalue(), filename=output_html_filename),
+                            caption=f"{prefix}{caption_text_raw}",
+                            reply_to_message_id=message.message_id
+                        )
+                        logger.info(f"Файл '{output_html_filename}' отправлен с полным заголовком.")
                 
                 else:
                     # --- ОБЫЧНАЯ ОТПРАВКА ОТВЕТА (НЕ ФАЙЛ) ---
@@ -1081,7 +1118,7 @@ async def main():
     """Основная функция запуска бота."""
     logger.info("=" * 60)
     logger.info("🚀 Бот IvanIvanych запускается...")
-    logger.info("🔄 ОПТИМИЗИРОВАННАЯ ВЕРСИЯ с поддержкой ZIP-архивов кода.")
+    logger.info("🔄 ОПТИМИЗИРОВАННАЯ ВЕРСИЯ с поддержкой ZIP-архивов кода и исправлением подписей.")
     logger.info(f"💰 Платные модели: {'ВКЛЮЧЕНЫ ✅' if USE_PAID_MODELS else 'отключены'}")
     
     logger.info("--- Конфигурация моделей ---")
@@ -1112,6 +1149,8 @@ async def main():
         
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем (KeyboardInterrupt).")
+    except TelegramBadRequest as e: # Обработка специфических ошибок Telegram при запуске
+        logger.error(f"💥 Критическая ошибка Telegram при запуске бота: {e}")
     except Exception as e:
         logger.error(f"💥 Критическая ошибка при запуске бота: {e}", exc_info=True)
     finally:
